@@ -9,6 +9,7 @@ export interface NetworkInfo {
 }
 
 export interface QueueAPI {
+  requestCounterId(): unknown;
   getQueueState: () => Promise<QueueState>;
   addTicket: (serviceType: string, customerName?: string) => Promise<Ticket>;
   callNextCustomer: (counterId: number) => Promise<Ticket | null>;
@@ -39,10 +40,15 @@ export interface AdminDbAPI {
 }
 
 export interface ResourcesAPI {
+  writeFile(configPath: string, arg1: string): unknown;
+  getPlatform(): unknown;
   getResourcePath: (resourceName: string) => Promise<string>;
 }
 
 export interface API {
+  printer: any;
+  config: any;
+  display: any;
   startLocalServer(): unknown;
   getNetworkInfo: () => Promise<NetworkInfo>;
   queue: QueueAPI;

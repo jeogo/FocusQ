@@ -1,61 +1,6 @@
-# النواتج المبنية
-/dist
-/out
-/.electron-vite
-/build
-
-# تبعيات npm
-/node_modules
-/.pnp
-.pnp.js
-.npm-debug.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
-
-# ملفات البيئة والإعدادات
-.env
-.env.*
-!.env.example
-.vscode/*
-!.vscode/extensions.json
-!.vscode/settings.json
-.idea
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
+node_modules
+dist
+out
 .DS_Store
-
-# ملفات النظام
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-$RECYCLE.BIN/
-._*
-
-# ملفات التخزين المؤقت
-.cache/
-.temp/
-*.tmp
-*.bak
-
-# ملفات السجلات
-logs
-*.log
-
-# ملفات خاصة بالتطبيق
-/queue-data
-/src/main/queue-data
-/src/renderer/dist
-
-# ملفات التغطية
-coverage
-.nyc_output
-
-# ملفات تكوينية محلية
 .eslintcache
-.stylelintcache
+*.log*

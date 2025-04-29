@@ -3,13 +3,36 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useQueue } from '../context/QueueContext'
+import * as SocketClient from '../services/socket/client'
+import { formatUtils } from '../services/QueueService';
+import Logo from '../components/Logo'
+
+// Generate a unique session ID for this browser tab/window
+const BROWSER_SESSION_ID = Math.random().toString(36).substring(2, 15);
+
+// Create a global counter tracker in localStorage
+
+// Cleanup function to remove this counter ID from tracking
+function cleanupCounterId() {
+  try {
+    const counterKey = 'focusq_counter_tracker';
+    const countersData = localStorage.getItem(counterKey);
+    if (countersData) {
+      let counters = JSON.parse(countersData);
+      // Remove this session's counter
+      counters = counters.filter(c => c.sessionId !== BROWSER_SESSION_ID);
+      localStorage.setItem(counterKey, JSON.stringify(counters));
+    }
+  } catch (error) {
+    console.error('Error cleaning up counter ID:', error);
+  }
+}
+
+// Check if we already have a counter ID in this session
 
 type EmployeeScreenProps = {
   counterId?: number // Optional prop to specify counter ID
 }
-
-// Add a static variable to keep track of the next available index
-let nextEmployeeIndex = 1;
 
 export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScreenProps) {
   const {
@@ -23,24 +46,14 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
     reconnectServer
   } = useQueue()
 
-  const sessionIndex = useRef<number>(nextEmployeeIndex++);
+  const sessionIndex = useRef<number>(1);
+  // Track server-assigned counter ID
+  const [serverAssignedCounterId, setServerAssignedCounterId] = useState<number | null>(null);
+  // Counter ID from URL or other sources
+  const [counterIdFromUrl, setCounterIdFromUrl] = useState<number | null>(null);
+  // Actual counter ID to use in the component
+  const [activeCounterId, setActiveCounterId] = useState<number | null>(null);
 
-  const getCounterIdFromUrl = useCallback(() => {
-    const urlParams = new URLSearchParams(window.location.search)
-    const counterParam = urlParams.get('counter')
-    const hashCounter = window.location.hash.match(/#employee\/(\d+)/)
-
-    if (propCounterId) return propCounterId
-    if (counterParam) return parseInt(counterParam, 10)
-    if (hashCounter) return parseInt(hashCounter[1], 10)
-
-    const savedCounter = localStorage.getItem(`employeeCounter_${sessionIndex.current}`)
-    if (savedCounter) return parseInt(savedCounter, 10)
-
-    return null
-  }, [propCounterId]);
-
-  const [counterIdFromUrl, setCounterIdFromUrl] = useState<number | null>(() => getCounterIdFromUrl());
   const [isInitializing, setIsInitializing] = useState(true)
   const [elapsedTime, setElapsedTime] = useState('00:00')
   const [startTime, setStartTime] = useState<number | null>(null)
@@ -49,12 +62,49 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
   const [statusMessage, setStatusMessage] = useState('')
   const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [isAssigningCounter, setIsAssigningCounter] = useState(false)
-  const pollingActive = useRef(true)
   const isComponentMounted = useRef(true)
 
+  // Get counter ID from URL parameters or hash
+  const getCounterIdFromUrl = useCallback(() => {
+    const urlParams = new URLSearchParams(window.location.search)
+    const counterParam = urlParams.get('counter')
+    const hashCounter = window.location.hash.match(/#employee\/(\d+)/)
+
+    // If counter ID was explicitly provided as a prop, use it
+    if (propCounterId) return propCounterId
+
+    // If counter parameter exists and has a numeric value, use it
+    if (counterParam && !isNaN(parseInt(counterParam, 10)))
+      return parseInt(counterParam, 10)
+
+    // If counter parameter exists but has no value, return null
+    if (counterParam === '')
+      return null
+
+    // Try to get counter ID from URL hash
+    if (hashCounter) return parseInt(hashCounter[1], 10)
+
+    // No counter ID found, return null
+    return null;
+  }, [propCounterId]);
+
+  // Initialize counter ID from URL on mount
+  useEffect(() => {
+    const urlCounterId = getCounterIdFromUrl();
+    setCounterIdFromUrl(urlCounterId);
+  }, [getCounterIdFromUrl]);
+
+  // Set page title based on counter ID
+  useEffect(() => {
+    if (activeCounterId) {
+      document.title = `شاشة الموظف - مكتب ${activeCounterId} - FocusQ`;
+    }
+  }, [activeCounterId]);
+
+  // Find current counter in queue state
   const currentCounter = useMemo(() =>
-    queueState?.counters?.find((c) => c.id === counterIdFromUrl) || null
-  , [queueState?.counters, counterIdFromUrl]);
+    queueState?.counters?.find((c) => c.id === activeCounterId) || null
+  , [queueState?.counters, activeCounterId]);
 
   const isBusy = useMemo(() => currentCounter?.busy || false, [currentCounter]);
 
@@ -68,217 +118,7 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
       : null
   , [currentCounter, queueState?.tickets]);
 
-  const autoAssignCounter = useCallback((counters) => {
-    if (!counters || counters.length === 0) return null
-
-    const availableCounters = counters.filter((c) => c.status === 'active' && !c.busy)
-    if (availableCounters.length === 0) {
-      const activeCounters = counters.filter(c => c.status === 'active')
-      return activeCounters.length > 0 ? activeCounters[0].id : counters[0].id
-    }
-
-    const activeCounterSessions = {}
-    const counterSessionPrefix = 'counter_session_'
-
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i)
-      if (key && key.startsWith(counterSessionPrefix)) {
-        const counterId = key.replace(counterSessionPrefix, '')
-        const sessionData = localStorage.getItem(key)
-
-        if (sessionData) {
-          try {
-            const { timestamp, session } = JSON.parse(sessionData)
-            if (Date.now() - timestamp < 2 * 60 * 1000 && session !== sessionIndex.current) {
-              activeCounterSessions[counterId] = true
-            } else if (Date.now() - timestamp >= 2 * 60 * 1000) {
-              localStorage.removeItem(key)
-            }
-          } catch (error) {
-            localStorage.removeItem(key)
-          }
-        }
-      }
-    }
-
-    const unusedCounter = availableCounters.find((c) => !activeCounterSessions[c.id])
-    if (unusedCounter) {
-      return unusedCounter.id
-    }
-
-    return availableCounters[0].id
-  }, []);
-
-  const markCounterInUse = useCallback((counterId) => {
-    if (!counterId) return;
-
-    const counterSessionKey = `counter_session_${counterId}`
-    const sessionData = {
-      timestamp: Date.now(),
-      session: sessionIndex.current
-    }
-
-    localStorage.setItem(counterSessionKey, JSON.stringify(sessionData))
-    localStorage.setItem(`employeeCounter_${sessionIndex.current}`, counterId.toString())
-
-    const intervalId = window.setInterval(() => {
-      if (isComponentMounted.current) {
-        sessionData.timestamp = Date.now()
-        localStorage.setItem(counterSessionKey, JSON.stringify(sessionData))
-      }
-    }, 60 * 1000)
-
-    const handleUnload = () => {
-      localStorage.removeItem(counterSessionKey)
-    }
-
-    window.addEventListener('beforeunload', handleUnload)
-
-    return () => {
-      window.removeEventListener('beforeunload', handleUnload)
-      clearInterval(intervalId)
-      if (isComponentMounted.current) {
-        localStorage.removeItem(counterSessionKey)
-      }
-    }
-  }, []);
-
-  const handleRefreshQueueState = useCallback(async () => {
-    try {
-      await contextRefreshQueueState();
-    } catch (error) {
-      console.error('Error refreshing queue state:', error)
-    }
-  }, [contextRefreshQueueState]);
-
-  useEffect(() => {
-    isComponentMounted.current = true
-    setIsInitializing(true)
-
-    handleRefreshQueueState().then(() => {
-      if (isComponentMounted.current) {
-        setIsInitializing(false)
-      }
-    })
-
-    return () => {
-      isComponentMounted.current = false
-    }
-  }, [handleRefreshQueueState])
-
-  // Handle reconnection attempts when connection is lost
-  useEffect(() => {
-    if (!isConnected) {
-      const attemptReconnect = async () => {
-        try {
-          await reconnectServer();
-          if (isComponentMounted.current) {
-            console.log('Reconnection successful');
-          }
-        } catch (error) {
-          console.error('Error during reconnection attempt:', error);
-          // Schedule next reconnection attempt if component is still mounted
-          if (isComponentMounted.current) {
-            setTimeout(attemptReconnect, 5000);
-          }
-        }
-      };
-
-      // Start reconnection process
-      attemptReconnect();
-    }
-  }, [isConnected, reconnectServer]);
-
-  useEffect(() => {
-    if (!counterIdFromUrl &&
-        queueState?.counters &&
-        queueState.counters.length > 0 &&
-        !isAssigningCounter &&
-        isComponentMounted.current) {
-
-      const assignCounter = async () => {
-        setIsAssigningCounter(true);
-        try {
-          const assignedCounterId = autoAssignCounter(queueState.counters);
-          if (assignedCounterId && isComponentMounted.current) {
-            setCounterIdFromUrl(assignedCounterId);
-
-            // لا تقم بتغيير عنوان الصفحة أو إعادة تحميلها
-            // فقط حدث العنوان في التاب نفسه
-            document.title = `شاشة الموظف - مكتب ${assignedCounterId} - FocusQ`;
-
-            showStatus(`تم تعيين المكتب ${assignedCounterId} تلقائياً`);
-          }
-        } finally {
-          if (isComponentMounted.current) {
-            setIsAssigningCounter(false);
-          }
-        }
-      };
-
-      assignCounter();
-    }
-  }, [queueState?.counters, counterIdFromUrl, isAssigningCounter, autoAssignCounter]);
-
-  useEffect(() => {
-    if (!counterIdFromUrl) return;
-
-    const cleanup = markCounterInUse(counterIdFromUrl);
-
-    return cleanup;
-  }, [counterIdFromUrl, markCounterInUse]);
-
-  useEffect(() => {
-    if (!startTime) return;
-
-    const timer = setInterval(() => {
-      if (!isComponentMounted.current) return;
-
-      const elapsed = Date.now() - startTime;
-      const minutes = Math.floor(elapsed / 60000);
-      const seconds = Math.floor((elapsed % 60000) / 1000);
-
-      const timeString = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-
-      if (isComponentMounted.current && timeString !== elapsedTime) {
-        setElapsedTime(timeString);
-      }
-    }, 1000);
-
-    return () => clearInterval(timer);
-  }, [startTime, elapsedTime]);
-
-  useEffect(() => {
-    if (!pollingActive.current || isLoading) return;
-
-    let timerId: number | null = null;
-
-    const getPollingInterval = () => {
-      // Use longer polling intervals to reduce load
-      if (isConnected) {
-        return currentCounter?.busy ? 45000 : 45000; // 45s when connected
-      }
-      return currentCounter?.busy ? 15000 : 15000; // 15s when not connected
-    };
-
-    const doPoll = () => {
-      if (!document.hidden && !isLoading && isComponentMounted.current && !isConnected) {
-        handleRefreshQueueState();
-      }
-      if (isComponentMounted.current) {
-        timerId = window.setTimeout(doPoll, getPollingInterval());
-      }
-    };
-
-    timerId = window.setTimeout(doPoll, getPollingInterval());
-
-    return () => {
-      if (timerId !== null) {
-        window.clearTimeout(timerId);
-      }
-    };
-  }, [isLoading, handleRefreshQueueState, currentCounter, isConnected]);
-
+  // Helper function to show status messages
   const showStatus = useCallback((message: string) => {
     setStatusMessage(message)
     setShowStatusMessage(true)
@@ -292,74 +132,225 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
     }, 3000)
   }, []);
 
+  // Register with server and listen for counter ID assignment
+  useEffect(() => {
+    if (!isConnected) return;
+
+    console.log('[EmployeeScreen] Connected to server, registering as employee screen');
+
+    // Register this screen as an employee screen
+    SocketClient.registerAsEmployeeScreen();
+
+    // Listen for counter ID assignment from server
+    const unsubscribe = SocketClient.listenForCounterId((counterId: number) => {
+      console.log(`[EmployeeScreen] Received counter ID from server: ${counterId}`);
+      setServerAssignedCounterId(counterId);
+    });
+
+    return unsubscribe;
+  }, [isConnected]);
+
+  // Determine the active counter ID to use
+  useEffect(() => {
+    // Priority order: server-assigned ID > URL/prop ID
+    if (serverAssignedCounterId !== null) {
+      console.log(`[EmployeeScreen] Using server-assigned counter ID: ${serverAssignedCounterId}`);
+      setActiveCounterId(serverAssignedCounterId);
+      showStatus(`تم تعيين المكتب ${serverAssignedCounterId} من الخادم`);
+    } else if (counterIdFromUrl !== null) {
+      console.log(`[EmployeeScreen] Using counter ID from URL/props: ${counterIdFromUrl}`);
+      setActiveCounterId(counterIdFromUrl);
+    }
+  }, [serverAssignedCounterId, counterIdFromUrl, showStatus]);
+
+  // Handle manual reconnection when connection is lost
+  useEffect(() => {
+    if (!isConnected) {
+      const attemptReconnect = async () => {
+        try {
+          await reconnectServer();
+          if (isComponentMounted.current) {
+            console.log('[EmployeeScreen] Reconnection successful');
+            // Re-register as employee screen after reconnection
+            SocketClient.registerAsEmployeeScreen();
+          }
+        } catch (error) {
+          console.error('[EmployeeScreen] Error during reconnection attempt:', error);
+          if (isComponentMounted.current) {
+            setTimeout(attemptReconnect, 5000);
+          }
+        }
+      };
+
+      attemptReconnect();
+    }
+  }, [isConnected, reconnectServer]);
+
+  // Mark counter as in use
+  useEffect(() => {
+    if (!activeCounterId) return;
+
+    const counterSessionKey = `counter_session_${activeCounterId}`;
+    const sessionData = {
+      timestamp: Date.now(),
+      session: sessionIndex.current
+    };
+
+    localStorage.setItem(counterSessionKey, JSON.stringify(sessionData));
+    localStorage.setItem(`employeeCounter_${sessionIndex.current}`, activeCounterId.toString());
+
+    // Keep updating the timestamp to show this counter is still in use
+    const intervalId = window.setInterval(() => {
+      if (isComponentMounted.current) {
+        sessionData.timestamp = Date.now();
+        localStorage.setItem(counterSessionKey, JSON.stringify(sessionData));
+      }
+    }, 60 * 1000);
+
+    const handleUnload = () => {
+      localStorage.removeItem(counterSessionKey);
+    };
+
+    window.addEventListener('beforeunload', handleUnload);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload);
+      clearInterval(intervalId);
+      if (isComponentMounted.current) {
+        localStorage.removeItem(counterSessionKey);
+      }
+    };
+  }, [activeCounterId]);
+
+  // Handle refresh queue state
+  const handleRefreshQueueState = useCallback(async () => {
+    try {
+      await contextRefreshQueueState();
+    } catch (error) {
+      console.error('[EmployeeScreen] Error refreshing queue state:', error)
+    }
+  }, [contextRefreshQueueState]);
+
+  // Initialize component
+  useEffect(() => {
+    isComponentMounted.current = true;
+    setIsInitializing(true);
+
+    handleRefreshQueueState().then(() => {
+      if (isComponentMounted.current) {
+        setIsInitializing(false);
+      }
+    });
+
+    return () => {
+      isComponentMounted.current = false;
+    };
+  }, [handleRefreshQueueState]);
+
+  // Handle call next customer
   const handleCallNext = async () => {
-    if (!counterIdFromUrl) return
+    if (!activeCounterId) return;
 
     try {
-      const result = await callNextCustomer(counterIdFromUrl)
+      console.log(`[EmployeeScreen] Calling next customer from counter ${activeCounterId}`);
+      // تأكد من أن معرف المكتب المستخدم هو رقم صحيح
+      const numericCounterId = parseInt(String(activeCounterId), 10);
+
+      if (isNaN(numericCounterId) || numericCounterId <= 0) {
+        console.error(`[EmployeeScreen] Invalid counter ID: ${activeCounterId}`);
+        showStatus('حدث خطأ: رقم المكتب غير صحيح');
+        return;
+      }
+
+      // عرض حالة طلب قيد التنفيذ
+      showStatus('جاري استدعاء العميل...');
+
+      const result = await callNextCustomer(numericCounterId);
+      console.log(`[EmployeeScreen] Call next customer result:`, result);
+
       if (result) {
-        showStatus('تم استدعاء العميل التالي بنجاح')
-        // لا تقم بتغيير عنوان الصفحة أو إعادة تحميلها هنا
-        // فقط قم بتحديث الحالة إذا لزم الأمر
+        showStatus('تم استدعاء العميل التالي بنجاح');
+
+        // تعيين وقت البدء بمجرد مناداة العميل بنجاح
+        setStartTime(Date.now());
+
+        // تحديث حالة القائمة للتأكد من أن التغييرات تنعكس على الواجهة
+        setTimeout(() => handleRefreshQueueState(), 500);
       } else {
-        showStatus('لا يوجد عملاء في الانتظار')
+        console.warn(`[EmployeeScreen] No success in call next customer response:`, result);
+        showStatus('لا يوجد عملاء في الانتظار');
       }
     } catch (error) {
-      console.error('Error calling next customer:', error)
-      showStatus('حدث خطأ أثناء استدعاء العميل التالي')
-    }
-  }
+      console.error('[EmployeeScreen] Error calling next customer:', error);
+      showStatus('حدث خطأ أثناء استدعاء العميل التالي');
 
+      // محاولة تحديث حالة القائمة بعد الخطأ
+      setTimeout(() => handleRefreshQueueState(), 1000);
+    }
+  };
+
+  // Handle complete service with error handling
   const handleCompleteService = async () => {
-    if (!counterIdFromUrl) return
+    if (!activeCounterId) return;
 
     try {
-      await completeService(counterIdFromUrl)
-      showStatus('تم إنهاء الخدمة بنجاح')
+      // تأكد من أن معرف المكتب المستخدم هو رقم صحيح
+      const numericCounterId = parseInt(String(activeCounterId), 10);
 
-      setStartTime(null)
-      setElapsedTime('00:00')
-    } catch (error) {
-      console.error('Error completing service:', error)
-      showStatus('حدث خطأ أثناء إنهاء الخدمة')
-    }
-  }
-
-  const handleReassignCounter = async () => {
-    if (counterIdFromUrl) {
-      localStorage.removeItem(`counter_session_${counterIdFromUrl}`)
-    }
-
-    setIsAssigningCounter(true)
-
-    if (queueState && queueState.counters) {
-      const assignedCounterId = autoAssignCounter(queueState.counters)
-      if (assignedCounterId) {
-        setCounterIdFromUrl(assignedCounterId)
-
-        // لا تقم بتغيير عنوان الصفحة أو إعادة تحميلها
-        document.title = `شاشة الموظف - مكتب ${assignedCounterId} - FocusQ`
-
-        showStatus(`تم تعيين المكتب ${assignedCounterId} تلقائياً`)
-      } else {
-        showStatus('لا توجد مكاتب متاحة للتعيين')
+      if (isNaN(numericCounterId) || numericCounterId <= 0) {
+        console.error(`[EmployeeScreen] Invalid counter ID in completeService: ${activeCounterId}`);
+        showStatus('حدث خطأ: رقم المكتب غير صحيح');
+        return;
       }
-    }
 
-    setIsAssigningCounter(false)
-  }
+      // تأكد من أن المكتب مشغول حاليًا قبل محاولة إنهاء الخدمة
+      if (!isBusy || !currentTicket) {
+        console.warn(`[EmployeeScreen] Attempted to complete service for counter ${numericCounterId} with no active ticket`);
+        showStatus('لا يوجد عميل حالي لإنهاء خدمته');
+        return;
+      }
 
-  const toggleCounterStatus = async () => {
-    if (!counterIdFromUrl) return
+      // عرض حالة طلب قيد التنفيذ
+      showStatus('جاري إنهاء الخدمة...');
 
-    const newStatus = counterStatus === 'active' ? 'inactive' : 'active'
-    try {
-      await updateCounterStatus(counterIdFromUrl, newStatus)
-      setCounterStatus(newStatus)
-      showStatus(`تم تغيير حالة المكتب إلى ${newStatus === 'active' ? 'نشط' : 'غير نشط'}`)
+      const result = await completeService(numericCounterId);
+      console.log(`[EmployeeScreen] Complete service result:`, result);
+
+      // إعادة تعيين الحالة بعد إنهاء الخدمة بنجاح
+      setStartTime(null);
+      setElapsedTime('00:00');
+
+      showStatus('تم إنهاء الخدمة بنجاح');
+
+      // تحديث حالة القائمة للتأكد من أن التغييرات تنعكس على الواجهة
+      setTimeout(() => handleRefreshQueueState(), 500);
     } catch (error) {
-      console.error('Error updating counter status:', error)
-      showStatus('حدث خطأ أثناء تحديث حالة المكتب')
+      console.error('[EmployeeScreen] Error completing service:', error);
+
+      // Check for specific ticket ownership error messages
+      if (error instanceof Error && error.message.includes('غير مسموح بإنهاء خدمة')) {
+        showStatus(error.message);
+      } else {
+        showStatus('حدث خطأ أثناء إنهاء الخدمة');
+      }
+
+      // محاولة تحديث حالة القائمة بعد الخطأ
+      setTimeout(() => handleRefreshQueueState(), 1000);
+    }
+  };
+
+  // Handle counter status toggle
+  const toggleCounterStatus = async () => {
+    if (!activeCounterId) return;
+
+    const newStatus = counterStatus === 'active' ? 'inactive' : 'active';
+    try {
+      await updateCounterStatus(activeCounterId, newStatus);
+      setCounterStatus(newStatus);
+      showStatus(`تم تغيير حالة المكتب إلى ${newStatus === 'active' ? 'نشط' : 'غير نشط'}`);
+    } catch (error) {
+      console.error('[EmployeeScreen] Error updating counter status:', error);
+      showStatus('حدث خطأ أثناء تحديث حالة المكتب');
     }
   }
 
@@ -389,13 +380,14 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
 
   if (isInitializing || isAssigningCounter || isLoading) {
     return (
-      <div className="h-screen flex items-center justify-center bg-gradient-to-b from-blue-50 to-white">
-        <div className="flex flex-col items-center bg-white p-8 rounded-2xl shadow-lg">
+      <div className="h-screen flex items-center justify-center bg-white">
+        <div className="flex flex-col items-center bg-white p-8 rounded-2xl shadow-md">
+          <Logo className="w-24 h-24 mb-6" />
           <div className="relative w-16 h-16 mb-3">
-            <div className="absolute top-0 left-0 w-full h-full border-4 border-blue-200 rounded-full"></div>
-            <div className="absolute top-0 left-0 w-full h-full border-4 border-t-blue-600 border-r-transparent border-b-transparent border-l-transparent rounded-full animate-spin"></div>
+            <div className="absolute top-0 left-0 w-full h-full border-4 border-gray-200 rounded-full"></div>
+            <div className="absolute top-0 left-0 w-full h-full border-4 border-t-blue-500 border-r-transparent border-b-transparent border-l-transparent rounded-full animate-spin"></div>
           </div>
-          <p className="text-lg text-gray-600 font-medium">
+          <p className="text-lg text-gray-700 font-medium">
             {isAssigningCounter ? 'جاري تعيين مكتب تلقائياً...' : 'جاري تهيئة النظام...'}
           </p>
         </div>
@@ -405,13 +397,14 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
 
   if (!queueState) {
     return (
-      <div className="h-screen flex items-center justify-center bg-gradient-to-b from-blue-50 to-white">
+      <div className="h-screen flex items-center justify-center bg-white">
         <div className="flex flex-col items-center">
+          <Logo className="w-24 h-24 mb-6" />
           <div className="relative w-16 h-16 mb-3">
-            <div className="absolute top-0 left-0 w-full h-full border-4 border-blue-200 rounded-full"></div>
-            <div className="absolute top-0 left-0 w-full h-full border-4 border-t-blue-600 border-r-transparent border-b-transparent border-l-transparent rounded-full animate-spin"></div>
+            <div className="absolute top-0 left-0 w-full h-full border-4 border-gray-200 rounded-full"></div>
+            <div className="absolute top-0 left-0 w-full h-full border-4 border-t-blue-500 border-r-transparent border-b-transparent border-l-transparent rounded-full animate-spin"></div>
           </div>
-          <p className="text-lg text-gray-600 font-medium">جاري تحميل البيانات...</p>
+          <p className="text-lg text-gray-700 font-medium">جاري تحميل البيانات...</p>
           <button
             onClick={() => contextRefreshQueueState()}
             className="mt-4 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
@@ -423,11 +416,15 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
     )
   }
 
+  function handleReassignCounter(event: React.MouseEvent<HTMLButtonElement>): void {
+    throw new Error('Function not implemented.');
+  }
+
   return (
-    <div className="min-h-screen bg-gradient-to-b from-blue-50 to-white p-4 md:p-6" dir="rtl">
-      {/* Show connection status indicator */}
-      {!isConnected && (
-        <div className="fixed top-4 right-4 bg-red-100 text-red-800 px-4 py-2 rounded-lg shadow-md flex items-center z-50">
+    <div className="min-h-screen bg-white p-4 md:p-6" dir="rtl">
+      {/* Show connection status indicator with counter ID info */}
+      {!isConnected ? (
+        <div className="fixed top-4 right-4 bg-white border border-red-200 text-red-600 px-4 py-2 rounded-lg shadow-sm flex items-center z-50">
           <svg className="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path
               strokeLinecap="round"
@@ -439,25 +436,33 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
           <span>انقطع الاتصال بالخادم</span>
           <button
             onClick={() => reconnectServer()}
-            className="ml-3 text-xs bg-red-200 hover:bg-red-300 px-2 py-1 rounded transition-colors"
+            className="ml-3 text-xs bg-red-50 hover:bg-red-100 px-2 py-1 rounded transition-colors"
           >
             إعادة الاتصال
           </button>
+        </div>
+      ) : (
+        <div className="fixed top-4 right-4 bg-white border border-green-200 text-green-600 px-4 py-2 rounded-lg shadow-sm flex items-center z-50">
+          <div className="w-2 h-2 rounded-full bg-green-500 mr-1"></div>
+          <span>متصل بالخادم</span>
+          <span className="mx-2 text-xs text-gray-400">|</span>
+          <span className="text-sm">مكتب رقم: {activeCounterId}</span>
         </div>
       )}
 
       <div className="max-w-5xl mx-auto">
         <header className="mb-6 flex flex-col md:flex-row justify-between items-center">
           <div className="flex items-center mb-3 md:mb-0">
+            <Logo className="w-12 h-12 mr-4" />
             <div
               className={`w-12 h-12 mr-3 rounded-xl flex items-center justify-center text-white ${
-                counterStatus === 'active' ? 'bg-blue-600' : 'bg-gray-400'
+                counterStatus === 'active' ? 'bg-blue-500' : 'bg-gray-400'
               }`}
             >
-              <span className="text-2xl font-bold">{counterIdFromUrl}</span>
+              <span className="text-2xl font-bold">{activeCounterId}</span>
             </div>
             <div>
-              <h1 className="text-2xl font-bold text-gray-800">المكتب {counterIdFromUrl}</h1>
+              <h1 className="text-2xl font-bold text-gray-800">المكتب {activeCounterId}</h1>
               <div className="flex items-center">
                 <div
                   className={`w-2 h-2 rounded-full mr-1 ${
@@ -476,8 +481,8 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
               onClick={toggleCounterStatus}
               className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center ${
                 counterStatus === 'active'
-                  ? 'bg-red-50 text-red-600 hover:bg-red-100'
-                  : 'bg-green-50 text-green-600 hover:bg-green-100'
+                  ? 'bg-red-50 text-red-600 hover:bg-red-100 border border-red-100'
+                  : 'bg-green-50 text-green-600 hover:bg-green-100 border border-green-100'
               }`}
               whileTap={{ scale: 0.97 }}
             >
@@ -498,7 +503,7 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
 
             <motion.button
               onClick={handleReassignCounter}
-              className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors flex items-center"
+              className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors flex items-center border border-blue-100"
               whileTap={{ scale: 0.97 }}
             >
               <svg className="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -516,8 +521,8 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <div className="md:col-span-1">
-            <div className="bg-white rounded-2xl shadow-lg overflow-hidden mb-6 border border-gray-100">
-              <div className="bg-gradient-to-r from-blue-600 to-blue-700 p-5 text-white">
+            <div className="bg-white rounded-xl shadow-sm overflow-hidden mb-6 border border-gray-200">
+              <div className="bg-gradient-to-r from-blue-500 to-blue-600 p-5 text-white">
                 <h2 className="text-xl font-bold flex items-center">
                   <svg
                     className="h-5 w-5 mr-2"
@@ -536,9 +541,9 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
                 </h2>
               </div>
               <div className="p-5">
-                <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-xl p-4 text-center">
+                <div className="bg-blue-50 rounded-xl p-4 text-center">
                   <p className="text-gray-700 mb-1">عدد العملاء في الانتظار</p>
-                  <p className="text-5xl font-bold text-blue-700">{ticketsWaiting}</p>
+                  <p className="text-5xl font-bold text-blue-600">{ticketsWaiting}</p>
                   <p className="text-sm text-gray-500 mt-2">
                     {ticketsWaiting === 0
                       ? 'لا يوجد عملاء في الانتظار'
@@ -551,7 +556,7 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
                 {ticketsWaiting > 0 && counterStatus === 'active' && !isBusy && (
                   <motion.button
                     onClick={handleCallNext}
-                    className="w-full mt-4 py-2.5 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-lg text-base font-medium hover:from-blue-700 hover:to-blue-800 shadow-sm transition-all flex items-center justify-center"
+                    className="w-full mt-4 py-2.5 bg-gradient-to-r from-blue-500 to-blue-600 text-white rounded-lg text-base font-medium hover:from-blue-600 hover:to-blue-700 shadow-sm transition-all flex items-center justify-center"
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
                   >
@@ -574,58 +579,15 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
               </div>
             </div>
 
-            <div className="bg-white rounded-2xl shadow-lg overflow-hidden border border-gray-100">
-              <div className="bg-gradient-to-r from-blue-600 to-blue-700 p-5 text-white">
-                <h2 className="text-xl font-bold flex items-center">
-                  <svg
-                    className="h-5 w-5 mr-2"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth="2"
-                      d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"
-                    />
-                  </svg>
-                  إحصائيات
-                </h2>
-              </div>
-              <div className="p-5">
-                <div className="flex flex-col gap-3">
-                  <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                    <span className="text-gray-600">الوقت المستغرق للعميل الحالي</span>
-                    <span className="text-lg font-medium text-blue-700">
-                      {isBusy ? elapsedTime : '-'}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                    <span className="text-gray-600">حالة المكتب</span>
-                    <span
-                      className={`px-2 py-1 rounded-md text-sm font-medium ${
-                        counterStatus === 'active'
-                          ? isBusy
-                            ? 'bg-yellow-100 text-yellow-800'
-                            : 'bg-green-100 text-green-800'
-                          : 'bg-gray-100 text-gray-800'
-                      }`}
-                    >
-                      {counterStatus === 'active' ? (isBusy ? 'مشغول' : 'متاح') : 'غير نشط'}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
+           
           </div>
 
           <div className="md:col-span-2">
-            <div className="bg-white rounded-2xl shadow-lg overflow-hidden mb-6 border border-gray-100">
+            <div className="bg-white rounded-xl shadow-sm overflow-hidden mb-6 border border-gray-200">
               <div
                 className={`p-5 flex justify-between items-center ${
                   isBusy
-                    ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white'
+                    ? 'bg-gradient-to-r from-blue-500 to-blue-600 text-white'
                     : 'bg-gray-100 text-gray-700'
                 }`}
               >
@@ -644,7 +606,7 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
                   <div className="text-center">
                     <div className="mb-6">
                       <div className="inline-flex rounded-full bg-blue-50 p-3 mb-3">
-                        <div className="bg-blue-100 w-16 h-16 rounded-full flex items-center justify-center text-3xl">
+                        <div className="bg-blue-100 w-16 h-16 rounded-full flex items-center justify-center text-3xl text-blue-700">
                           {getServiceTypeIcon(currentTicket.serviceType)}
                         </div>
                       </div>
@@ -653,9 +615,9 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
                       </h3>
                     </div>
 
-                    <div className="bg-blue-50 py-6 px-4 rounded-2xl mb-6 flex flex-col items-center">
+                    <div className="bg-blue-50 py-6 px-4 rounded-xl mb-6 flex flex-col items-center border border-blue-100">
                       <div className="text-sm text-blue-600 mb-1">رقم التذكرة</div>
-                      <div className="text-6xl font-bold text-blue-700 mb-2">
+                      <div className="text-6xl font-bold text-blue-600 mb-2">
                         {currentTicket.id}
                       </div>
                       <div className="text-sm text-gray-500">بدأت الخدمة منذ {elapsedTime}</div>
@@ -663,7 +625,7 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
 
                     <motion.button
                       onClick={handleCompleteService}
-                      className="py-3 px-6 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-xl text-lg font-medium hover:from-green-700 hover:to-green-800 shadow-md transition-all flex items-center justify-center mx-auto"
+                      className="py-3 px-6 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-xl text-lg font-medium hover:from-green-600 hover:to-green-700 shadow-md transition-all flex items-center justify-center mx-auto"
                       whileHover={{ scale: 1.03 }}
                       whileTap={{ scale: 0.97 }}
                     >
@@ -718,11 +680,11 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
                       ticketsWaiting > 0 ? (
                         <div>
                           <p className="text-gray-500 mb-6">
-                            يوجد {ticketsWaiting} عملاء في انتظار الخدمة
+                            يوجد {formatUtils.formatNumber(ticketsWaiting)} عملاء في انتظار الخدمة
                           </p>
                           <motion.button
                             onClick={handleCallNext}
-                            className="py-3 px-6 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-xl text-lg font-medium hover:from-blue-700 hover:to-blue-800 shadow-md transition-all flex items-center justify-center mx-auto"
+                            className="py-3 px-6 bg-gradient-to-r from-blue-500 to-blue-600 text-white rounded-xl text-lg font-medium hover:from-blue-600 hover:to-blue-700 shadow-md transition-all flex items-center justify-center mx-auto"
                             whileHover={{ scale: 1.03 }}
                             whileTap={{ scale: 0.97 }}
                           >
@@ -746,7 +708,7 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
                         <p className="text-gray-500">لا يوجد عملاء في الانتظار حالياً</p>
                       )
                     ) : (
-                      <div className="bg-yellow-50 text-yellow-800 p-4 rounded-lg inline-flex items-start">
+                      <div className="bg-yellow-50 text-yellow-700 p-4 rounded-lg inline-flex items-start border border-yellow-200">
                         <svg
                           className="h-5 w-5 mr-2 flex-shrink-0 mt-0.5"
                           fill="none"
@@ -771,8 +733,8 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
               </div>
             </div>
 
-            <div className="bg-white rounded-2xl shadow-lg overflow-hidden border border-gray-100">
-              <div className="p-5 border-b border-gray-100">
+            <div className="bg-white rounded-xl shadow-sm overflow-hidden border border-gray-200">
+              <div className="p-5 border-b border-gray-200">
                 <h2 className="text-xl font-bold text-gray-800">التعليمات</h2>
               </div>
               <div className="p-5">
@@ -833,7 +795,8 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
           </div>
         </div>
 
-        <footer className="mt-8 text-center text-gray-500 text-sm">
+        <footer className="mt-8 text-center text-gray-400 text-sm">
+          <Logo className="w-10 h-10 mx-auto mb-2 opacity-30" />
           جميع الحقوق محفوظة © {new Date().getFullYear()}
         </footer>
       </div>
@@ -841,7 +804,7 @@ export default function EmployeeScreen({ counterId: propCounterId }: EmployeeScr
       <AnimatePresence>
         {showStatusMessage && (
           <motion.div
-            className="fixed bottom-4 left-1/2 transform -translate-x-1/2 bg-gray-800 text-white px-4 py-2 rounded-lg shadow-lg z-50"
+            className="fixed bottom-4 left-1/2 transform -translate-x-1/2 bg-white border border-gray-200 text-gray-800 px-4 py-2 rounded-lg shadow-lg z-50"
             initial={{ opacity: 0, y: 50 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 10 }}

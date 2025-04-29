@@ -2,6 +2,8 @@ import React, { createContext, useState, useContext, useEffect, useCallback, Rea
 import * as SocketClient from '../services/socket/client';
 import * as QueueService from '../services/QueueService';
 import { Ticket, QueueState } from '../services/QueueService';
+import { Socket } from 'socket.io-client';
+import type { SocketConfig } from '../services/socket/client';
 
 // Define the context type
 export interface QueueContextType {
@@ -10,6 +12,7 @@ export interface QueueContextType {
   isLoading: boolean;
   error: string | null;
   isConnected: boolean;
+  socket: Socket | null; // إضافة socket للسياق
   addTicket: (serviceType: string) => Promise<Ticket>;
   callNextCustomer: (counterId: number) => Promise<Ticket | null>;
   completeService: (counterId: number) => Promise<boolean>;
@@ -28,6 +31,7 @@ const QueueContext = createContext<QueueContextType>({
   isLoading: false,
   error: null,
   isConnected: false,
+  socket: null, // إضافة القيمة الافتراضية
   addTicket: async () => ({ id: 0, timestamp: 0, status: 'waiting', serviceType: 'general' }),
   callNextCustomer: async () => null,
   completeService: async () => false,
@@ -45,12 +49,13 @@ export const QueueProvider: React.FC<{ children: ReactNode }> = ({ children }) =
   const [connectionStatus, setConnectionStatus] = useState<SocketClient.ConnectionStatus>(
     SocketClient.getConnectionStatus()
   );
+  const [socket, setSocket] = useState<Socket | null>(SocketClient.getSocket());
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
   const [offlineMode, setOfflineMode] = useState<boolean>(false);
-  
+
   // Function to load queue state from cache when offline
   const loadFromCache = useCallback(() => {
     try {
@@ -79,31 +84,23 @@ export const QueueProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     }
   }, []);
 
-  // Initialize connection with fixed server address
+  // Initialize connection (remove any fixed address usage)
   useEffect(() => {
     let isMounted = true;
-    
+
     const initializeConnection = async () => {
       try {
-        console.log('[QueueContext] Initializing connection to 192.168.1.14:4000...');
+        console.log('[QueueContext] Initializing connection...');
         setIsLoading(true);
-        
-        // Connect to socket server with fixed address
-        await SocketClient.connectToServer({
-          serverHost: '192.168.1.14',
-          serverPort: 4000,
-          reconnectionAttempts: 15,
-          reconnectionDelay: 1000,
-          timeout: 10000,
-          heartbeatInterval: 10000,
-          heartbeatTimeout: 5000
-        });
-        
+
+        // Connect using socket client (which now has fallback mechanism)
+        await SocketClient.connectToServer();
+
         if (!isMounted) return;
-        
+
         setIsConnected(true);
         setError(null);
-        
+
         // Get initial queue state
         const state = await QueueService.getQueueState();
         if (isMounted) {
@@ -115,14 +112,14 @@ export const QueueProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         }
       } catch (err) {
         console.error('[QueueContext] Connection error:', err);
-        
+
         if (!isMounted) return;
-        
+
         setIsConnected(false);
         loadFromCache();
         setError('فشل الاتصال بالخادم. يرجى التحقق من الاتصال.');
         setIsLoading(false);
-        
+
         // Try reconnecting after a delay
         setTimeout(() => {
           if (isMounted && !isConnected) {
@@ -131,27 +128,39 @@ export const QueueProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         }, 5000);
       }
     };
-    
+
     // Start initialization
     initializeConnection();
-    
+
     // Subscribe to connection status changes
     const unsubscribe = SocketClient.subscribeToConnectionStatus((status) => {
       if (!isMounted) return;
-      
+
       setConnectionStatus(status);
       setIsConnected(status.status === 'connected');
-      
+
       // If connection was lost and restored, refresh state
       if (status.status === 'connected' && !isConnected) {
         refreshQueueState(false);
       }
     });
-    
+
     // Cleanup function
     return () => {
       isMounted = false;
       unsubscribe();
+    };
+  }, []);
+
+  // استمع للتغييرات في socket
+  useEffect(() => {
+    const handleSocketChange = () => {
+      setSocket(SocketClient.getSocket());
+    };
+
+    window.addEventListener('socket-changed', handleSocketChange);
+    return () => {
+      window.removeEventListener('socket-changed', handleSocketChange);
     };
   }, []);
 
@@ -161,11 +170,11 @@ export const QueueProvider: React.FC<{ children: ReactNode }> = ({ children }) =
       console.log('[QueueContext] Offline mode, not refreshing');
       return;
     }
-    
+
     if (showLoading) {
       setIsLoading(true);
     }
-    
+
     try {
       if (!SocketClient.getSocket()?.connected) {
         console.log('[QueueContext] Socket exists but not connected, using cached state');
@@ -173,7 +182,7 @@ export const QueueProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         setIsLoading(false);
         return;
       }
-      
+
       const state = await QueueService.getQueueState();
       setQueueState(state);
       setLastUpdated(new Date());
@@ -191,12 +200,12 @@ export const QueueProvider: React.FC<{ children: ReactNode }> = ({ children }) =
   // Add ticket
   const addTicket = useCallback(async (serviceType: string): Promise<Ticket> => {
     setIsLoading(true);
-    
+
     try {
       if (offlineMode) {
         throw new Error('Cannot add ticket in offline mode');
       }
-      
+
       if (!SocketClient.getSocket()?.connected) {
         try {
           await reconnectServer();
@@ -204,12 +213,19 @@ export const QueueProvider: React.FC<{ children: ReactNode }> = ({ children }) =
           throw new Error('Not connected to socket server');
         }
       }
-      
-      const ticket = await QueueService.addTicket(serviceType);
+
+      const response = await QueueService.addTicket(serviceType);
       await refreshQueueState(false);
-      return ticket;
+
+      // Ensure we have a valid ticket object
+      if (response === undefined || response === null || typeof response !== 'object' || !('id' in response)) {
+        throw new Error('Invalid ticket returned from server');
+      }
+
+      return response as Ticket;
     } catch (err) {
       setError('Error adding ticket');
+      // Return a dummy ticket to satisfy the return type, or rethrow the error as before
       throw err;
     } finally {
       setIsLoading(false);
@@ -219,12 +235,12 @@ export const QueueProvider: React.FC<{ children: ReactNode }> = ({ children }) =
   // Call next customer
   const callNextCustomer = useCallback(async (counterId: number): Promise<Ticket | null> => {
     setIsLoading(true);
-    
+
     try {
       if (offlineMode) {
         throw new Error('Cannot call next customer in offline mode');
       }
-      
+
       if (!SocketClient.getSocket()?.connected) {
         try {
           await reconnectServer();
@@ -232,10 +248,14 @@ export const QueueProvider: React.FC<{ children: ReactNode }> = ({ children }) =
           throw new Error('Not connected to socket server');
         }
       }
-      
-      const ticket = await QueueService.callNextCustomer(counterId);
+
+      const result = await QueueService.callNextCustomer(counterId);
       await refreshQueueState(false);
-      return ticket;
+      // Handle the case where the result is a boolean instead of a Ticket
+      if (typeof result === 'boolean') {
+        return null;
+      }
+      return result as Ticket;
     } catch (err) {
       setError('Error calling next customer');
       return null;
@@ -247,12 +267,12 @@ export const QueueProvider: React.FC<{ children: ReactNode }> = ({ children }) =
   // Complete service
   const completeService = useCallback(async (counterId: number): Promise<boolean> => {
     setIsLoading(true);
-    
+
     try {
       if (offlineMode) {
         throw new Error('Cannot complete service in offline mode');
       }
-      
+
       if (!SocketClient.getSocket()?.connected) {
         try {
           await reconnectServer();
@@ -260,7 +280,7 @@ export const QueueProvider: React.FC<{ children: ReactNode }> = ({ children }) =
           throw new Error('Not connected to socket server');
         }
       }
-      
+
       await QueueService.completeService(counterId);
       await refreshQueueState(false);
       return true;
@@ -275,12 +295,12 @@ export const QueueProvider: React.FC<{ children: ReactNode }> = ({ children }) =
   // Update counter status
   const updateCounterStatus = useCallback(async (counterId: number, status: string): Promise<boolean> => {
     setIsLoading(true);
-    
+
     try {
       if (offlineMode) {
         throw new Error('Cannot update counter status in offline mode');
       }
-      
+
       if (!SocketClient.getSocket()?.connected) {
         try {
           await reconnectServer();
@@ -288,7 +308,7 @@ export const QueueProvider: React.FC<{ children: ReactNode }> = ({ children }) =
           throw new Error('Not connected to socket server');
         }
       }
-      
+
       await QueueService.updateCounterStatus(counterId, status);
       await refreshQueueState(false);
       return true;
@@ -300,17 +320,17 @@ export const QueueProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     }
   }, [offlineMode, refreshQueueState]);
 
-  // تعديل وظيفة إعادة الاتصال للاستخدام مع العنوان الثابت
+  // تعديل وظيفة إعادة الاتصال للاعتماد فقط على ملف الإعدادات
   const reconnectServer = useCallback(async (): Promise<boolean> => {
     setIsLoading(true);
-    
+
     try {
-      console.log('[QueueContext] Attempting to reconnect to 192.168.1.14:4000...');
-      
-      // Try reconnection with fixed address
+      console.log('[QueueContext] Attempting to reconnect...');
+
+      // Reconnect using config from socketConfig.json
       const success = await SocketClient.reconnectToServer();
       setIsConnected(success);
-      
+
       if (success) {
         await refreshQueueState(false);
         setOfflineMode(false);
@@ -356,6 +376,7 @@ export const QueueProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         isLoading,
         error,
         isConnected,
+        socket, // إضافة socket للسياق
         addTicket,
         callNextCustomer,
         completeService,

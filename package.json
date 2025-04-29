@@ -17,7 +17,7 @@
     "dev:seq": "cross-env NODE_ENV=development LAUNCH_ALL_SCREENS=true SEQUENTIAL_START=true electron-vite dev",
     "dev:customer": "cross-env NODE_ENV=development SCREEN_TYPE=customer electron-vite dev",
     "dev:display": "cross-env NODE_ENV=development SCREEN_TYPE=display electron-vite dev",
-    "dev:employee": "cross-env NODE_ENV=development SCREEN_TYPE=employee COUNTER_ID=1 electron-vite dev",
+    "dev:employee": "cross-env NODE_ENV=development SCREEN_TYPE=employee COUNTER_ID=2 electron-vite dev",
     "dev:admin": "cross-env NODE_ENV=development SCREEN_TYPE=admin electron-vite dev",
     "build": "electron-vite build",
     "rebuild": "electron-vite build",
@@ -30,6 +30,8 @@
   "dependencies": {
     "@electron-toolkit/preload": "^2.0.0",
     "@electron-toolkit/utils": "^2.0.0",
+    "@electron/remote": "^2.1.2",
+    "electron-pos-printer": "^1.3.7",
     "electron-updater": "^6.1.1",
     "express": "^5.1.0",
     "framer-motion": "^10.16.4",

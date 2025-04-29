@@ -9,20 +9,28 @@ import EmployeeScreen from './screens/EmployeeScreen'
 import AdminScreen from './screens/AdminScreen'
 import { QueueProvider } from './context/QueueContext'
 import { SERVER_CONFIG } from './config/serverConfig';
+import type { Ticket, Counter, QueueState } from './types';
 
 // Detect if we're running in Electron or browser
 const isElectron = window.navigator.userAgent.toLowerCase().indexOf('electron') > -1
 
 // Determine which screen to show based on URL parameter or hash
-function getScreenDetails(): { type: string; counterId?: number } {
-  // In development, we use query parameters
+function getScreenDetails(): { type: string; counterId?: number; displayId?: number } {
+  // First check if this is a static asset request
+  if (window.location.pathname.startsWith('/assets/')) {
+    return { type: 'asset' };
+  }
+
+  // Rest of your existing screen detection code
   const urlParams = new URLSearchParams(window.location.search)
   const screenParam = urlParams.get('screen')
   const counterParam = urlParams.get('counter')
+  const displayParam = urlParams.get('display')  // Add display parameter support
 
   // In production, we use hash
   let hash = window.location.hash.replace('#', '')
   let hashCounterId: number | undefined = undefined
+  let hashDisplayId: number | undefined = undefined  // Add display ID for hash
 
   // Check for employee screen with counter ID (format: employee/123)
   const employeeMatch = hash.match(/^employee\/(\d+)$/)
@@ -31,32 +39,35 @@ function getScreenDetails(): { type: string; counterId?: number } {
     hashCounterId = parseInt(employeeMatch[1], 10)
   }
 
+  // Check for display screen with display ID (format: display/123)
+  const displayMatch = hash.match(/^display\/(\d+)$/)
+  if (displayMatch) {
+    hash = 'display'
+    hashDisplayId = parseInt(displayMatch[1], 10)
+  }
+
   return {
     type: screenParam || hash || 'customer',
-    counterId: counterParam ? parseInt(counterParam, 10) : hashCounterId
-  }
+    counterId: counterParam ? parseInt(counterParam, 10) : hashCounterId,
+    displayId: displayParam ? parseInt(displayParam, 10) : hashDisplayId
+  };
 }
 
 // Initialize browser API polyfill if we're not in Electron
 if (!isElectron && !window.api) {
+  // استخدم الأنواع الصحيحة من types.ts
   // Define ticket interface
-  interface Ticket {
-    id: number;
-    timestamp: number;
-    status: string;
-    serviceType: string;
-    counterNumber?: number;
-  }
-
   // Simple in-memory state for browser testing
-  const browserQueueState = {
+  const browserQueueState: QueueState = {
     tickets: [] as Ticket[],
-    counters: [{ id: 1, busy: false, currentTicket: null as number | null, status: 'active' }],
+    counters: [{ id: 1, busy: false, currentTicket: null, status: 'active' }],
     lastTicketNumber: 0
   }
 
   // Browser API polyfill
   window.api = {
+    config: SERVER_CONFIG, // Add the missing config property
+    display: {},
     getNetworkInfo: function (): Promise<{ localIp: string; isConnected: boolean }> {
       return Promise.resolve({ localIp: 'localhost', isConnected: true })
     },
@@ -79,64 +90,56 @@ if (!isElectron && !window.api) {
       getDbInfo: async () => Promise.resolve(null)
     },
     queue: {
-      getQueueState: async () => {
-        return Promise.resolve(browserQueueState)
+      getQueueState: async (): Promise<QueueState> => {
+        // تأكد من أن كل تذكرة status من النوع الصحيح
+        return {
+          ...browserQueueState,
+          tickets: browserQueueState.tickets.map(t => ({
+            ...t,
+            status: t.status as Ticket['status']
+          })),
+          counters: browserQueueState.counters.map(c => ({ ...c }))
+        };
       },
-      addTicket: async (serviceType: string) => {
-        // Create a new ticket
-        const newTicket = {
+      addTicket: async (serviceType: string, customerName?: string): Promise<Ticket> => {
+        const newTicket: Ticket = {
           id: ++browserQueueState.lastTicketNumber,
           timestamp: Date.now(),
           status: 'waiting',
-          serviceType
-        }
-
-        // Add to local state
-        browserQueueState.tickets.push(newTicket)
-        return Promise.resolve(newTicket)
+          serviceType,
+          ...(customerName ? { customerName } : {})
+        };
+        browserQueueState.tickets.push(newTicket);
+        return newTicket;
       },
-      callNextCustomer: async (counterId: number) => {
-        // Find next waiting ticket
-        const nextTicket = browserQueueState.tickets.find((t) => t.status === 'waiting')
-        if (!nextTicket) return Promise.resolve(null)
-
-        // Update ticket status
-        nextTicket.status = 'serving'
-        nextTicket.counterNumber = counterId
-
-        // Update counter
-        const counter = browserQueueState.counters.find((c) => c.id === counterId)
+      callNextCustomer: async (counterId: number): Promise<Ticket | null> => {
+        const nextTicket = browserQueueState.tickets.find((t) => t.status === 'waiting');
+        if (!nextTicket) return null;
+        nextTicket.status = 'serving';
+        nextTicket.counterNumber = counterId;
+        const counter = browserQueueState.counters.find((c) => c.id === counterId);
         if (counter) {
-          counter.busy = true
-          counter.currentTicket = nextTicket.id
+          counter.busy = true;
+          counter.currentTicket = nextTicket.id;
         }
-
-        return Promise.resolve(nextTicket)
+        return nextTicket;
       },
-      completeService: async (counterId: number) => {
-        const counter = browserQueueState.counters.find((c) => c.id === counterId)
-        if (!counter || counter.currentTicket === null) {
-          return Promise.resolve()
-        }
-
-        // Find and update ticket
-        const ticket = browserQueueState.tickets.find((t) => t.id === counter.currentTicket)
+      completeService: async (counterId: number): Promise<void> => {
+        const counter = browserQueueState.counters.find((c) => c.id === counterId);
+        if (!counter || counter.currentTicket === null) return;
+        const ticket = browserQueueState.tickets.find((t) => t.id === counter.currentTicket);
         if (ticket) {
-          ticket.status = 'complete'
+          ticket.status = 'complete';
         }
-
-        // Update counter
-        counter.busy = false
-        counter.currentTicket = null
-
-        return Promise.resolve()
+        counter.busy = false;
+        counter.currentTicket = null;
       },
       updateCounterStatus: async (counterId: number, status: string) => {
-        const counter = browserQueueState.counters.find((c) => c.id === counterId)
+        const counter = browserQueueState.counters.find((c) => c.id === counterId);
         if (counter) {
-          counter.status = status
+          counter.status = status as Counter['status'];
         }
-        return Promise.resolve(true)
+        return true;
       },
       createEmployeeWindow: (counterId: number) => {
         // In browser mode, open a new tab
@@ -150,12 +153,12 @@ if (!isElectron && !window.api) {
         window.open(url.toString(), '_blank')
         return Promise.resolve({ success: true })
       },
-      onQueueStateUpdated: (callback: (data: any) => void) => {
+      onQueueStateUpdated: () => {
         // In browser mode, there's no real-time updates
         // Just return a no-op function as unsubscribe
         return () => { }
       },
-      connectToServer: function (serverUrl?: string): Promise<any> {
+      connectToServer: function (): Promise<any> {
         throw new Error('Function not implemented.')
       },
       disconnectFromServer: function (): Promise<void> {
@@ -163,92 +166,57 @@ if (!isElectron && !window.api) {
       },
       startLocalServer: function (): Promise<any> {
         throw new Error('Function not implemented.')
-      }
+      },
+      requestCounterId: () => Promise.resolve(1)
     },
     // Add a stub for 'resources' to match the API type
     resources: {
-      getResourcePath: function (resourceName: string): Promise<string> {
+      getResourcePath: function (): Promise<string> {
+        throw new Error('Function not implemented.')
+      },
+      getPlatform: function (): unknown {
+        throw new Error('Function not implemented.')
+      },
+      writeFile: function (): unknown {
         throw new Error('Function not implemented.')
       }
     }
   }
 }
 
-async function startSocketServerIfNeeded() {
-  const { type: screenType } = getScreenDetails();
-  
-  // Only the display screen should start the socket server
-  if (screenType === 'display') {
-    console.log('Display screen detected, ensuring socket server is running...');
-    
-    try {
-      // For Electron, use the main process
-      if (window.api) {
-        // Check if this is the server machine
-        const networkInfo = await window.api.getNetworkInfo();
-        if (networkInfo.localIp === SERVER_CONFIG.SERVER_HOST) {
-          console.log(`This is the server machine (${SERVER_CONFIG.SERVER_HOST}), starting socket server...`);
-          const result = await window.api.startLocalServer();
-          console.log('Socket server started:', result);
-        } else {
-          console.log(`This is a remote display, will connect to ${SERVER_CONFIG.SERVER_HOST}:${SERVER_CONFIG.SERVER_PORT}`);
-        }
-        return { success: true };
-      } 
-      // For browser dev mode, use a direct connection
-      else {
-        console.log(`Running in browser mode, connecting to ${SERVER_CONFIG.SERVER_HOST}:${SERVER_CONFIG.SERVER_PORT}`);
-        return { success: true };
-      }
-    } catch (error) {
-      console.error('Failed to start socket server:', error);
-    }
-  } else {
-    console.log(`${screenType} screen detected, will connect to ${SERVER_CONFIG.SERVER_HOST}:${SERVER_CONFIG.SERVER_PORT}`);
-  }
-  
-  return { success: true };
-}
 
 // Modify renderApp to wait for server startup first
 async function renderApp(): Promise<void> {
   try {
-    // First ensure server is started (if this is the display screen)
-    await startSocketServerIfNeeded();
-    
+    const { type, counterId, displayId } = getScreenDetails();
+
+    // Don't render app UI for asset requests
+    if (type === 'asset') {
+      return;
+    }
+
     // Now continue with the regular app initialization
-    const { type: screenType, counterId } = getScreenDetails();
-    let Component: React.ComponentType<any>;
-    const componentProps: any = {}
+    let Component;
+    let props: any = {};
 
     // Select the component based on the screen type
-    switch (screenType) {
-      case 'admin':
-        Component = AdminScreen
-        document.title = 'لوحة تحكم الأدمن - FocusQ'
-        document.body.classList.add('fullscreen-mode', 'admin-screen-mode')
-        break
-      case 'display':
-        Component = DisplayScreen
-        document.title = 'شاشة العرض - FocusQ'
-        document.body.classList.add('fullscreen-mode', 'display-screen-mode')
-        break
-      case 'employee':
-        Component = EmployeeScreen
-        document.title = counterId
-          ? `شاشة الموظف - مكتب ${counterId} - FocusQ`
-          : 'شاشة الموظف - FocusQ'
-        document.body.classList.add('fullscreen-mode', 'employee-screen-mode')
-        if (counterId) {
-          componentProps.counterId = counterId
-        }
-        break
+    switch (type) {
       case 'customer':
+        Component = CustomerScreen;
+        break;
+      case 'display':
+        Component = DisplayScreen;
+        props = { displayId: displayId || 1 }; // Pass display ID
+        break;
+      case 'employee':
+        Component = EmployeeScreen;
+        props = { counterId };
+        break;
+      case 'admin':
+        Component = AdminScreen;
+        break;
       default:
-        Component = CustomerScreen
-        document.title = 'شاشة العملاء - FocusQ'
-        document.body.classList.add('fullscreen-mode', 'customer-screen-mode')
-        break
+        Component = CustomerScreen;
     }
 
     // Set full screen mode
@@ -258,12 +226,10 @@ async function renderApp(): Promise<void> {
     document.body.style.padding = '0'
     document.body.style.overflow = 'hidden'
 
-    createRoot(document.getElementById('root')!).render(
+    createRoot(document.getElementById('root') as HTMLElement).render(
       <StrictMode>
         <QueueProvider>
-          <div className="fullscreen-container" dir="rtl">
-            <Component {...componentProps} />
-          </div>
+          <Component {...props} />
         </QueueProvider>
       </StrictMode>
     )
@@ -299,6 +265,7 @@ declare global {
       updateCounterStatus: (counterId: number, status: string) => Promise<any>
       createEmployeeWindow: (counterId: number) => Promise<any>
       onQueueStateUpdated: (callback: (data: any) => void) => () => void
+      requestCounterId: () => Promise<number>
     }
     adminDb?: {
       getServices: () => Promise<any>
@@ -321,7 +288,7 @@ declare global {
       getDbInfo: () => Promise<any>
     }
   }
-  
+
   // Augment the Window interface instead of redeclaring it
 
 }

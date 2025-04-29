@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
 import * as SocketClient from '../services/socket/client';
+import type { SocketConfig } from '../services/socket/client';
 import { SERVER_CONFIG } from '../config/serverConfig';
 
 export default function ConnectionSettings({ onClose }: { onClose: () => void }) {
@@ -18,12 +19,11 @@ export default function ConnectionSettings({ onClose }: { onClose: () => void })
       await SocketClient.connectToServer({
         serverHost: serverIp,
         serverPort: parseInt(serverPort),
-        reconnectionAttempts: 15,
-        reconnectionDelay: 1000,
-        timeout: 10000,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 2000,
         heartbeatInterval: 10000,
-        heartbeatTimeout: 5000
-      });
+        heartbeatTimeout: 20000,
+      } as SocketConfig);
       
       setMessage('تم الاتصال بالخادم بنجاح!');
       setTimeout(onClose, 1500);

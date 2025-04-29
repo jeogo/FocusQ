@@ -1,6 +1,9 @@
 import { Socket } from 'socket.io-client';
 import * as SocketClient from './socket/client';
 
+// استيراد دوال التنسيق
+import * as formatUtils from '../utils/formatUtils';
+
 // Queue interfaces
 interface Ticket {
   id: number;
@@ -128,6 +131,9 @@ export const addTicket = async (serviceType: string): Promise<Ticket> => {
 
   const attemptAddTicket = async (): Promise<Ticket> => {
     try {
+      // تطبيق منطق إعادة العد اليومي
+      const dailyState = resetDailyIfNeeded();
+
       const socket = ensureConnected();
 
       return new Promise((resolve, reject) => {
@@ -135,9 +141,17 @@ export const addTicket = async (serviceType: string): Promise<Ticket> => {
           reject(new Error('Request timed out'));
         }, 10000);
 
-        socket.emit('add-ticket', { serviceType }, (response: Ticket) => {
+        socket.emit('add-ticket', {
+          serviceType,
+          dailyTicketId: dailyState.lastTicketId + 1 // يبدأ من 1 كل يوم
+        }, (response: Ticket) => {
           clearTimeout(timeout);
           if (response) {
+            // تحديث رقم آخر تذكرة يومية
+            saveDailyState({
+              lastDate: dailyState.lastDate,
+              lastTicketId: dailyState.lastTicketId + 1
+            });
             resolve(response);
           } else {
             reject(new Error('Invalid response from server'));
@@ -158,52 +172,6 @@ export const addTicket = async (serviceType: string): Promise<Ticket> => {
 
   return attemptAddTicket();
 };
-
-// Call next customer
-export async function callNextCustomer(counterId: number): Promise<Ticket> {
-  const socket = SocketClient.getSocket();
-
-  if (!socket) {
-    throw new Error('Not connected to socket server');
-  }
-
-  return new Promise<Ticket>((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Call next customer timeout')), 5000);
-
-    socket.emit('callNextCustomer', counterId, (response: { success: boolean, ticket?: Ticket, error?: string }) => {
-      clearTimeout(timeout);
-
-      if (response.success && response.ticket) {
-        resolve(response.ticket);
-      } else {
-        reject(new Error(response.error || 'Failed to call next customer'));
-      }
-    });
-  });
-}
-
-// Complete service
-export async function completeService(counterId: number): Promise<boolean> {
-  const socket = SocketClient.getSocket();
-
-  if (!socket) {
-    throw new Error('Not connected to socket server');
-  }
-
-  return new Promise<boolean>((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Complete service timeout')), 5000);
-
-    socket.emit('completeService', counterId, (response: { success: boolean, error?: string }) => {
-      clearTimeout(timeout);
-
-      if (response.success) {
-        resolve(true);
-      } else {
-        reject(new Error(response.error || 'Failed to complete service'));
-      }
-    });
-  });
-}
 
 // Update counter status
 export async function updateCounterStatus(counterId: number, status: string): Promise<boolean> {
@@ -301,6 +269,53 @@ export function getTicketById(ticketId: number): Ticket | undefined {
   return currentQueueState.tickets.find(ticket => ticket.id === ticketId);
 }
 
+// Call next customer to a counter
+export async function callNextCustomer(counterId: number): Promise<boolean> {
+  const socket = SocketClient.getSocket();
+
+  if (!socket) {
+    throw new Error('Not connected to socket server');
+  }
+
+  return new Promise<boolean>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Call next customer timeout')), 5000);
+
+    // FIX: send counterId as a number, not as an object
+    socket.emit('callNextCustomer', counterId, (response: { success: boolean, error?: string }) => {
+      clearTimeout(timeout);
+
+      if (response.success) {
+        resolve(true);
+      } else {
+        reject(new Error(response.error || 'Failed to call next customer'));
+      }
+    });
+  });
+}
+
+export async function completeService(counterId: number): Promise<boolean> {
+  const socket = SocketClient.getSocket();
+
+  if (!socket) {
+    throw new Error('Not connected to socket server');
+  }
+
+  return new Promise<boolean>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Complete service timeout')), 5000);
+
+    // FIX: send counterId as a number, not as an object
+    socket.emit('completeService', counterId, (response: { success: boolean, error?: string }) => {
+      clearTimeout(timeout);
+
+      if (response.success) {
+        resolve(true);
+      } else {
+        reject(new Error(response.error || 'Failed to complete service'));
+      }
+    });
+  });
+}
+
 // Default export
 export default {
   initQueueService,
@@ -321,3 +336,53 @@ export default {
 };
 
 export type { QueueState, Ticket, Counter };
+
+// تعديل الدوال الموجودة لاستخدام ملف التنسيق المشترك
+function getTodayString() {
+  return formatUtils.getTodayString();
+}
+
+// تعديل دالة فتح حالة اليومية لاستخدام التنسيق الإنجليزي
+function loadDailyState() {
+  const state = localStorage.getItem('queueDailyState');
+  if (state) {
+    return JSON.parse(state);
+  }
+  return { lastDate: getTodayString(), lastTicketId: 0 };
+}
+
+// Call this before adding a new ticket
+function resetDailyIfNeeded() {
+  const today = getTodayString();
+  let state = loadDailyState();
+  if (state.lastDate !== today) {
+    // Reset everything for new day
+    state = { lastDate: today, lastTicketId: 0 }; // يبدأ من 0، أول تذكرة ستكون 1
+  }
+  saveDailyState(state);
+  return state;
+}
+
+// Save daily state
+function saveDailyState(state: { lastDate: string, lastTicketId: number }) {
+  localStorage.setItem('queueDailyState', JSON.stringify(state));
+}
+
+// دوال مساعدة للإدارة تستخدم التنسيق الإنجليزي
+export function getCurrentTicketNumber(): number {
+  const state = loadDailyState();
+  return state.lastTicketId;
+}
+
+export function getLastResetDate(): string {
+  const state = loadDailyState();
+  return state.lastDate;
+}
+
+export function getTodayTicketsCount(): number {
+  return getCurrentTicketNumber();
+}
+
+// تصدير دوال التنسيق لاستخدامها في المكونات الأخرى
+export { formatUtils };
+

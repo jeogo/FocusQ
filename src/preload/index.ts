@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
@@ -25,6 +24,12 @@ const api = {
     // إنشاء نافذة موظف جديدة
     createEmployeeWindow: (counterId: number) =>
       ipcRenderer.invoke('create-employee-window', counterId),
+
+    // الحصول على معرف مكتب جديد متاح
+    getNextCounterId: () => ipcRenderer.invoke('get-next-counter-id'),
+
+    // إنشاء مكتب جديد
+    addCounter: () => ipcRenderer.invoke('add-counter'),
 
     // الاشتراك في تحديثات حالة الطابور
     onQueueStateUpdated: (callback: (data: any) => void) => {
@@ -56,25 +61,21 @@ const api = {
     clearDatabase: () => ipcRenderer.invoke('db-clear-database'),
     getDbInfo: () => ipcRenderer.invoke('db-get-info')
   },
-  // Add new resources API section
+  // Resources API
   resources: {
-    getResourcePath: (resourceName: string) => ipcRenderer.invoke('get-resource-path', resourceName)
-  }
+    getResourcePath: (resourcePath: string) => 
+      ipcRenderer.invoke('get-resource-path', resourcePath),
+    checkResourceExists: (resourcePath: string) =>
+      ipcRenderer.invoke('check-resource-exists', resourcePath)
+  },
 }
 
-// Use `contextBridge` APIs to expose Electron APIs to
-// renderer only if context isolation is enabled, otherwise
-// just add to the DOM global.
-if (process.contextIsolated) {
-  try {
-    contextBridge.exposeInMainWorld('electron', electronAPI)
-    contextBridge.exposeInMainWorld('api', api)
-  } catch (error) {
-    console.error(error)
+// Use contextBridge to expose API to renderer
+contextBridge.exposeInMainWorld('api', {
+  ...api,
+
+  // Add display screen management API
+  display: {
+    createNewDisplay: () => ipcRenderer.invoke('create-display-screen')
   }
-} else {
-  // @ts-ignore (define in dts)
-  window.electron = electronAPI
-  // @ts-ignore (define in dts)
-  window.api = api
-}
+})

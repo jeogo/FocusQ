@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, Menu } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
@@ -6,6 +6,12 @@ import * as os from 'os'
 import * as fs from 'fs'
 import * as db from './db'
 import { startServer, stopServer, updateQueueState, setInitialState } from './socket/express-server'
+import {
+  ensureStorageFolder,
+  loadData,
+  saveData,
+  saveAllPendingData
+} from './optimizedStorage'
 
 // Store employee windows with their counter ID
 const employeeWindows: Map<number, BrowserWindow> = new Map()
@@ -34,21 +40,19 @@ interface QueueState {
   extraData?: Record<string, any>
 }
 
-const queueState: QueueState = {
+// قيمة افتراضية للطابور
+const defaultQueueState: QueueState = {
   tickets: [],
   lastTicketNumber: 0,
   counters: [{ id: 1, busy: false, currentTicket: null, status: 'active' }],
   extraData: {}
 }
 
-// إنشاء مجلد للتخزين
-const DATA_FOLDER = join(app.getPath('userData'), 'queue-data')
-if (!fs.existsSync(DATA_FOLDER)) {
-  fs.mkdirSync(DATA_FOLDER, { recursive: true })
-}
+// حالة الطابور المخزنة في الذاكرة
+let queueState: QueueState = { ...defaultQueueState }
 
-// مسار ملف حفظ حالة الطابور
-const QUEUE_STATE_FILE = join(DATA_FOLDER, 'queue-state.json')
+// اسم ملف حفظ حالة الطابور
+const QUEUE_STATE_FILENAME = 'queue-state.json'
 
 // الحصول على عنوان IP المحلي للشبكة
 function getLocalIpAddress(): string {
@@ -69,49 +73,55 @@ function getLocalIpAddress(): string {
   return localIp
 }
 
-// Load queue state from disk
-function loadQueueState(): void {
+// تحميل حالة الطابور من التخزين - أصبحت غير متزامنة
+async function loadQueueState(): Promise<void> {
   try {
-    if (fs.existsSync(QUEUE_STATE_FILE)) {
-      const data = fs.readFileSync(QUEUE_STATE_FILE, 'utf8')
-      const loadedState = JSON.parse(data)
+    const loadedState = await loadData<QueueState>(QUEUE_STATE_FILENAME, defaultQueueState);
 
-      // Merge loaded state with default state
-      Object.assign(queueState, loadedState)
-      console.log('Loaded queue state from file')
-    } else {
-      // Create initial state file
-      saveQueueState()
-      console.log('Created new queue state file')
+    // دمج الحالة المحملة مع الحالة الافتراضية
+    queueState = {
+      ...defaultQueueState,
+      ...loadedState,
+      // التأكد من وجود خصائص إضافية قد تكون أضيفت في إصدارات أحدث
+      extraData: {
+        ...defaultQueueState.extraData,
+        ...(loadedState.extraData || {})
+      }
     }
+
+    console.log('تم تحميل حالة الطابور من التخزين');
   } catch (error) {
-    console.error('Error loading queue state:', error)
+    console.error('خطأ في تحميل حالة الطابور:', error);
+    // في حالة الخطأ، استخدام الحالة الافتراضية
+    queueState = { ...defaultQueueState };
+    // حفظ الحالة الافتراضية للاستخدام المستقبلي
+    saveQueueState();
   }
 }
 
-// Save queue state to disk
+// حفظ حالة الطابور - أصبحت تستخدم نظام التخزين المحسن
 function saveQueueState(): void {
   try {
-    fs.writeFileSync(QUEUE_STATE_FILE, JSON.stringify(queueState, null, 2), 'utf8')
+    saveData(QUEUE_STATE_FILENAME, queueState);
   } catch (error) {
-    console.error('Error saving queue state:', error)
+    console.error('خطأ في حفظ حالة الطابور:', error);
   }
 }
 
-function createSingleWindow(screen: 'customer' | 'display' | 'employee' | 'admin', counterId?: number) {
+function createSingleWindow(screen: 'customer' | 'display' | 'employee' | 'admin', counterId?: number, displayId?: number) {
   let win: BrowserWindow
+
+  // Build window title - now includes display ID when applicable
+  const title =
+    screen === 'display' ? `شاشة العرض${displayId ? ` ${displayId}` : ''}`
+    : screen === 'customer' ? 'شاشة العملاء'
+    : screen === 'employee' ? `شاشة الموظف${counterId ? ' - مكتب ' + counterId : ''}`
+    : 'لوحة تحكم الأدمن';
 
   win = new BrowserWindow({
     width: screen === 'display' ? 900 : 600,
     height: screen === 'display' ? 700 : 600,
-    title:
-      screen === 'customer'
-        ? 'شاشة العملاء'
-        : screen === 'display'
-        ? 'شاشة العرض'
-        : screen === 'employee'
-        ? `شاشة الموظف${counterId ? ' - مكتب ' + counterId : ''}`
-        : 'لوحة تحكم الأدمن',
+    title,
     show: false,
     autoHideMenuBar: true,
     ...(process.platform === 'linux' ? { icon } : {}),
@@ -122,31 +132,57 @@ function createSingleWindow(screen: 'customer' | 'display' | 'employee' | 'admin
   })
 
   win.on('ready-to-show', () => win.show())
-  win.on('closed', () => (win = null!))
 
-  // تحديد عنوان URL للنافذة
-  let url: string
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    // Make absolutely sure the screen parameter is passed correctly
-    url = `${process.env['ELECTRON_RENDERER_URL']}?screen=${screen}`
-    if (screen === 'employee' && counterId) url += `&counter=${counterId}`
+    let url = process.env['ELECTRON_RENDERER_URL'];
 
-    console.log(`Loading URL: ${url}`) // Add logging to debug
-    win.loadURL(url)
+    // Add screen type and IDs as URL parameters
+    url += `?screen=${screen}`;
+    if (counterId) url += `&counter=${counterId}`;
+    if (displayId) url += `&display=${displayId}`;
+
+    win.loadURL(url);
   } else {
-    url = join(__dirname, '../renderer/index.html')
-    if (screen === 'employee' && counterId) {
-      win.loadFile(url, { hash: `employee/${counterId}` })
-    } else {
-      win.loadFile(url, { hash: screen })
-    }
+    win.loadFile('index.html', {
+      // In production, use the resources from the app's path
+      // removed 'pathname' property
+      hash: `#${screen}`
+    });
   }
 
   return win
 }
 
+// Helper function to find next available display ID
+function getNextDisplayId(): number {
+  const displayWindows = BrowserWindow.getAllWindows().filter(win =>
+    win.getTitle().toLowerCase().includes('شاشة العرض')
+  );
+
+  let highestId = 0;
+  displayWindows.forEach(win => {
+    const match = win.getTitle().match(/شاشة العرض (\d+)/);
+    if (match) {
+      const id = parseInt(match[1], 10);
+      if (id > highestId) highestId = id;
+    }
+  });
+
+  return highestId + 1;
+}
+
+// Function to create new display screen with next available ID
+function createNewDisplayScreen() {
+  const nextId = getNextDisplayId();
+  createSingleWindow('display', undefined, nextId);
+  return nextId;
+}
+
 // This method will be called when Electron has finished initialization
 app.whenReady().then(async () => {
+  // تهيئة مجلد التخزين
+  await ensureStorageFolder();
+
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
 
@@ -168,8 +204,8 @@ app.whenReady().then(async () => {
     console.log(`Database location: ${db.dbInfo.dataFolder}`)
   }
 
-  // Load saved queue state
-  loadQueueState()
+  // تحميل حالة الطابور المحفوظة بشكل غير متزامن
+  await loadQueueState()
 
   // Check if we should start multiple windows for development
   const launchAllScreens = process.env.LAUNCH_ALL_SCREENS === 'true';
@@ -198,6 +234,26 @@ app.whenReady().then(async () => {
       employeeWindows.set(counterId, mainWindow);
     }
   }
+
+  // Create application menu with display options
+  const menu = Menu.buildFromTemplate([
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'New Display Screen',
+          click: () => {
+            createNewDisplayScreen();
+          }
+        },
+        { type: 'separator' },
+        { role: 'quit' }
+      ]
+    },
+    // Add other menu items as needed
+  ]);
+
+  Menu.setApplicationMenu(menu);
 })
 
 // Add IPC handler for creating new employee window
@@ -218,8 +274,9 @@ app.on('window-all-closed', () => {
 })
 
 // Cleanup on app exit
-app.on('will-quit', () => {
-  saveQueueState();
+app.on('will-quit', async () => {
+  // حفظ أي بيانات معلقة قبل الإغلاق
+  await saveAllPendingData();
   stopServer(); // Stop the Express server
 })
 
@@ -234,11 +291,65 @@ function setupIPC(): void {
     }
   })
 
-  // Handle resource path requests
-  ipcMain.handle('get-resource-path', (_, resourceName) => {
-    const resourcePath = join(__dirname, '../../resources', resourceName)
-    return resourcePath
-  })
+  // Check if resource exists
+  ipcMain.handle('check-resource-exists', (_, resourcePath) => {
+    const possiblePaths: string[] = [];
+
+    if (is.dev) {
+      // In development, check multiple paths
+      possiblePaths.push(
+        join(__dirname, '../../renderer/public', resourcePath),
+        join(__dirname, '../../public', resourcePath),
+        join(__dirname, '../../resources', resourcePath)
+      );
+    } else {
+      // In production
+      possiblePaths.push(
+        join(process.resourcesPath, resourcePath)
+      );
+    }
+
+    // Check each path
+    for (const path of possiblePaths) {
+      if (fs.existsSync(path)) {
+        console.log(`Resource found at: ${path}`);
+        return true;
+      }
+    }
+
+    console.warn(`Resource not found: ${resourcePath}`);
+    return false;
+  });
+
+  // Handle resource path requests with improved path resolution
+  ipcMain.handle('get-resource-path', (_, resourcePath) => {
+    const possiblePaths: string[] = [];
+
+    if (is.dev) {
+      // In development, check multiple paths
+      possiblePaths.push(
+        join(__dirname, '../../renderer/public', resourcePath),
+        join(__dirname, '../../public', resourcePath),
+        join(__dirname, '../../resources', resourcePath)
+      );
+    } else {
+      // In production
+      possiblePaths.push(
+        join(process.resourcesPath, resourcePath)
+      );
+    }
+
+    // Return the first path that exists
+    for (const path of possiblePaths) {
+      if (fs.existsSync(path)) {
+        console.log(`Resource found at: ${path}`);
+        return path;
+      }
+    }
+
+    console.warn(`Resource not found: ${resourcePath}`);
+    return null;
+  });
 
   // For compatibility: these functions don't do anything meaningful anymore
   ipcMain.handle('connect-to-websocket-server', async () => {
@@ -258,10 +369,10 @@ function setupIPC(): void {
         Object.assign(queueState, newState);
         saveQueueState();
       });
-      
+
       // Initialize the server with our current state
       setInitialState(queueState);
-      
+
       return {
         success: true,
         url: `http://${result.localIp}:4000`,
@@ -276,11 +387,11 @@ function setupIPC(): void {
     }
   })
 
-  // Improved implementation to prevent unnecessary updates
+  // تحسين معالجة طلبات حالة الطابور
   let lastQueueStateCall = 0;
   let pendingQueueStatePromise: Promise<any> | null = null;
-  let lastQueueStateString: string = ''; // for comparison
-  let employeeWindows = new Set<number>(); // Track which employee windows are open
+  let lastQueueStateString: string = '';
+  let employeeWindows = new Set<number>();
 
   ipcMain.handle('get-queue-state', (event) => {
     const now = Date.now();
@@ -329,7 +440,7 @@ function setupIPC(): void {
     return pendingQueueStatePromise;
   });
 
-  // Add a new ticket - with optimized broadcasting
+  // Add a new ticket - with optimized saveQueueState
   ipcMain.handle('add-ticket', (_, serviceType = 'general', customerName = '') => {
     // Create new ticket
     const newTicketNumber = queueState.lastTicketNumber + 1
@@ -417,7 +528,6 @@ function setupIPC(): void {
   ipcMain.handle('db-add-service', (_, name, type) => db.addService(name, type))
   ipcMain.handle('db-delete-service', (_, id) => db.deleteService(id))
   ipcMain.handle('db-get-tickets', () => db.getTickets())
-  ipcMain.handle('db-add-ticket', (_, ticket) => db.addTicket(ticket))
   ipcMain.handle('db-update-ticket-status', (_, id, status) => db.updateTicketStatus(id, status))
   ipcMain.handle('db-get-counters', () => db.getCounters())
   ipcMain.handle('db-update-counter', (_, id, status, busy, currentTicket) => db.updateCounter(id, status, busy, currentTicket))
@@ -437,7 +547,40 @@ function setupIPC(): void {
     return db.dbInfo
   })
 
-  // Broadcast queue state updates to all windows
+  // Get next available counter ID
+  ipcMain.handle('get-next-counter-id', () => {
+    try {
+      // Get all counters from db
+      const counters = db.getCounters();
+
+      // If no counters exist, return 1
+      if (counters.length === 0) {
+        return 1;
+      }
+
+      // Sort counters by ID to find sequential gaps
+      const sortedCounters = [...counters].sort((a, b) => a.id - b.id);
+
+      // Find the first gap in the sequence
+      let nextId = 1;
+      for (const counter of sortedCounters) {
+        if (counter.id === nextId) {
+          nextId++;
+        } else if (counter.id > nextId) {
+          // Found a gap
+          break;
+        }
+      }
+
+      console.log(`Next available counter ID: ${nextId}`);
+      return nextId;
+    } catch (error) {
+      console.error('Error getting next counter ID:', error);
+      return 1; // Default to 1 if there's an error
+    }
+  });
+
+  // كتابة حالة الطابور إلى القرص باستخدام نظام التخزين المحسن
   function broadcastQueueState(): void {
     try {
       // Get all windows
@@ -470,10 +613,10 @@ function setupIPC(): void {
       // Also update the socket server state
       updateQueueState(queueState);
 
-      // Save state to disk for persistence
+      // وقت محدد لحفظ البيانات بعد تحديث الحالة
       saveQueueState();
     } catch (error) {
-      console.error('Error broadcasting queue state:', error);
+      console.error('Error broadcasting queue state:', error)
     }
   }
 
@@ -525,7 +668,7 @@ function setupIPC(): void {
       // Save state to disk for persistence
       saveQueueState();
     } catch (error) {
-      console.error('Error broadcasting filtered queue state:', error);
+      console.error('Error broadcasting filtered queue state:', error)
     }
   }
 }
@@ -551,61 +694,39 @@ function createSequentialWindows() {
     // Step 1: Create display window first (it's the central component)
     setTimeout(() => {
       console.log('Creating display window first...');
-      const displayWindow = createSingleWindow('display');
+      const displayWindow = createSingleWindow('display', undefined, 1); // Always start with ID 1
       windows.set('display', displayWindow);
 
-      // Step 2: Create customer window after display is set up
+      // Step 2: Create customer window
       setTimeout(() => {
         console.log('Creating customer window...');
-        const mainWindow = createSingleWindow('customer');
-        windows.set('customer', mainWindow);
+        const customerWindow = createSingleWindow('customer');
+        windows.set('customer', customerWindow);
 
         // Step 3: Create employee window
         setTimeout(() => {
           console.log('Creating employee window...');
-          const employee1Window = createSingleWindow('employee', 1);
-          employeeWindows.set(1, employee1Window);
-          windows.set('employee1', employee1Window);
+          const employeeWindow = createSingleWindow('employee', 1); // Counter ID 1
+          windows.set('employee', employeeWindow);
+          employeeWindows.set(1, employeeWindow);
 
-          // Step 4: Finally create admin window
+          // Step 4: Create admin window
           setTimeout(() => {
             console.log('Creating admin window...');
             const adminWindow = createSingleWindow('admin');
             windows.set('admin', adminWindow);
 
-            // Position windows for better visibility during development
-            const { width, height } = require('electron').screen.getPrimaryDisplay().workAreaSize;
-            const halfWidth = Math.floor(width / 2);
-            const halfHeight = Math.floor(height / 2);
-
-            const win1 = windows.get('customer');
-            if (win1) {
-              win1.setPosition(0, 0);
-              win1.setSize(halfWidth, halfHeight);
+            // Create additional display screens if needed
+            const additionalDisplays = parseInt(process.env.ADDITIONAL_DISPLAYS || '0', 10);
+            for (let i = 2; i <= additionalDisplays + 1; i++) {
+              setTimeout(() => {
+                console.log(`Creating additional display window ${i}...`);
+                createSingleWindow('display', undefined, i);
+              }, (i - 1) * 500); // Stagger creation
             }
-
-            const win2 = windows.get('display');
-            if (win2) {
-              win2.setPosition(halfWidth, 0);
-              win2.setSize(halfWidth, halfHeight);
-            }
-
-            const win3 = windows.get('employee1');
-            if (win3) {
-              win3.setPosition(0, halfHeight);
-              win3.setSize(halfWidth, halfHeight);
-            }
-
-            const win4 = windows.get('admin');
-            if (win4) {
-              win4.setPosition(halfWidth, halfHeight);
-              win4.setSize(halfWidth, halfHeight);
-            }
-
-            console.log('All windows launched successfully in sequential order')
-          }, 500)
-        }, 500)
-      }, 500)
-    }, 1000)
+          }, 500);
+        }, 500);
+      }, 500);
+    }, 500);
   });
 }

@@ -8,6 +8,8 @@ interface QueueAPI {
   completeService: (counterId: number) => Promise<any>
   updateCounterStatus: (counterId: number, status: 'active' | 'inactive') => Promise<any>
   createEmployeeWindow: (counterId: number) => Promise<any>
+  getNextCounterId: () => Promise<number>
+  addCounter: () => Promise<number>
   onQueueStateUpdated: (callback: (data: any) => void) => () => void
   connectToServer: (serverUrl?: string) => Promise<any>
   disconnectFromServer: () => Promise<void>
@@ -30,6 +32,11 @@ interface AdminDbAPI {
   getDbInfo: () => Promise<any>
 }
 
+interface ResourcesAPI {
+  getResourcePath: (resourcePath: string) => Promise<string | null>
+  checkResourceExists: (resourcePath: string) => Promise<boolean>
+}
+
 declare global {
   interface ElectronAPI {
     startSocketServer?: () => void;
@@ -44,6 +51,7 @@ declare global {
     api: {
       queue: QueueAPI
       adminDb: AdminDbAPI
+      resources: ResourcesAPI
     }
   }
 }

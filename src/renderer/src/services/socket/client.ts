@@ -19,24 +19,30 @@ if (typeof window !== 'undefined') {
   });
 }
 
-// Default server config - استخدام عنوان IP المحدد
-const defaultConfig = {
-  serverHost: '192.168.1.14', // تعيين عنوان IP الخادم المركزي
-  serverPort: 4000,           // تعيين منفذ الخادم المركزي
-  reconnectionAttempts: 15,
-  reconnectionDelay: 1000,
-  timeout: 10000,
-  heartbeatInterval: 10000,
-  heartbeatTimeout: 5000
+// Define the config interface
+export interface SocketConfig {
+  serverHost: string;
+  serverPort: number;
+  reconnectionAttempts?: number;
+  reconnectionDelay?: number;
+  heartbeatInterval?: number;
+  heartbeatTimeout?: number;
+}
+
+// defaultConfig should be empty; all config must come from socketConfig.json
+const defaultConfig: SocketConfig = {
+  serverHost: '',
+  serverPort: 0
 };
 
-// Connection status
+// Enhanced connection status interface to include counter ID
 export interface ConnectionStatus {
   status: 'connected' | 'connecting' | 'disconnected' | 'error';
   lastConnected: Date | null;
   lastError: Error | null;
   reconnectAttempt?: number;
   latency?: number;
+  counterId?: number; // Add counter ID to connection status
 }
 
 // Connection status observers
@@ -81,21 +87,22 @@ function updateConnectionStatus(
   statusObservers.forEach(observer => observer(currentStatus));
 }
 
-// Heartbeat function to verify if connection is still alive
+// استخدم فترة نبضات (heartbeat) أقل من مهلة السيرفر (مثلاً 5000ms)
+let HEARTBEAT_INTERVAL = 5000; // 5 ثوانٍ
+let HEARTBEAT_TIMEOUT = 12000; // 12 ثانية (يجب أن تكون أقل من مهلة السيرفر بقليل)
+
 async function sendHeartbeat() {
   if (!socket?.connected) {
-    console.log('Heartbeat: Socket disconnected, attempting to reconnect');
-    triggerReconnect();
+    console.log('Heartbeat: Socket disconnected');
     return;
   }
 
   try {
     const startTime = Date.now();
-    // Set up a timeout for the heartbeat
     const heartbeatPromise = new Promise<boolean>((resolve, reject) => {
       const timeout = setTimeout(() => {
         reject(new Error('Heartbeat timeout'));
-      }, defaultConfig.heartbeatTimeout);
+      }, HEARTBEAT_TIMEOUT);
 
       socket!.emit('ping', (response: { timestamp?: number }) => {
         clearTimeout(timeout);
@@ -107,34 +114,25 @@ async function sendHeartbeat() {
     const latency = Date.now() - startTime;
 
     if (isAlive) {
-      // Only log every 5 heartbeats to reduce console spam
-      if (Math.random() < 0.2) {
-        console.log(`Heartbeat successful, latency: ${latency}ms`);
-      }
-
-      // Update connection status with latency information
       updateConnectionStatus('connected', null, { latency });
     } else {
-      console.warn('Heartbeat received invalid response');
-      triggerReconnect();
+      console.warn('Invalid heartbeat response');
+      socket?.disconnect();
     }
   } catch (error) {
     console.error('Heartbeat failed:', error);
-    // Socket might be connected but not responding, force reconnect
-    triggerReconnect();
+    socket?.disconnect();
   }
 }
 
 // Start heartbeat monitoring
-function startHeartbeat(interval = defaultConfig.heartbeatInterval) {
+function startHeartbeat(interval = HEARTBEAT_INTERVAL) {
   if (heartbeatInterval) {
     clearInterval(heartbeatInterval);
   }
 
   heartbeatInterval = setInterval(sendHeartbeat, interval);
   console.log(`Heartbeat monitoring started (interval: ${interval}ms)`);
-
-  // Send an immediate heartbeat to check connection
   sendHeartbeat();
 }
 
@@ -165,10 +163,10 @@ function triggerReconnect() {
   }
 
   // Check if we've exceeded max reconnection attempts
-  if (reconnectAttempts >= defaultConfig.reconnectionAttempts) {
+  if (reconnectAttempts >= (defaultConfig.reconnectionAttempts ?? 5)) {
     if (reconnectAttempts > maxReconnectAttempts) {
       maxReconnectAttempts = reconnectAttempts;
-      console.error(`Maximum reconnection attempts (${defaultConfig.reconnectionAttempts}) reached`);
+      console.error(`Maximum reconnection attempts (${defaultConfig.reconnectionAttempts ?? 5}) reached`);
     }
 
     // Continue retrying but at a much slower rate (every 30 seconds)
@@ -183,7 +181,7 @@ function triggerReconnect() {
   }
 
   // Exponential backoff for reconnection with jitter to prevent thundering herd
-  const baseDelay = defaultConfig.reconnectionDelay * Math.pow(1.5, reconnectAttempts);
+  const baseDelay = (defaultConfig.reconnectionDelay ?? 2000) * Math.pow(1.5, reconnectAttempts);
   const jitter = Math.random() * 0.3 * baseDelay; // Add up to 30% jitter
   const delay = Math.min(baseDelay + jitter, 30000);
 
@@ -197,8 +195,45 @@ function triggerReconnect() {
   }, delay);
 }
 
-// Improve connection reliability
-export async function connectToServer(config = defaultConfig): Promise<Socket> {
+let loadedConfig: SocketConfig | null = null;
+let configPromise: Promise<SocketConfig> | null = null;
+
+// Load config with better fallback mechanism
+async function getSocketConfig(): Promise<SocketConfig> {
+  if (loadedConfig) return loadedConfig;
+  if (!configPromise) {
+    configPromise = fetch('/config/socketConfig.json')
+      .then(res => {
+        if (!res.ok) throw new Error('Failed to load socketConfig.json');
+        return res.json();
+      })
+      .then((json: Partial<SocketConfig> | null) => {
+        if (!json || !json.serverHost || !json.serverPort) {
+          throw new Error('socketConfig.json missing required fields (serverHost or serverPort)');
+        }
+        loadedConfig = {
+          ...defaultConfig,
+          ...json,
+          serverHost: json.serverHost,
+          serverPort: json.serverPort,
+          reconnectionAttempts: json.reconnectionAttempts ?? 5,
+          reconnectionDelay: json.reconnectionDelay ?? 2000,
+          heartbeatInterval: json.heartbeatInterval ?? 10000,
+          heartbeatTimeout: json.heartbeatTimeout ?? 20000
+        };
+        console.log('[Socket] Loaded config from JSON:', loadedConfig);
+        return loadedConfig;
+      })
+      .catch((err) => {
+        console.error('Failed to load socket config, cannot connect:', err);
+        throw err;
+      });
+  }
+  return configPromise;
+}
+
+// Improve socket options
+export async function connectToServer(config?: SocketConfig): Promise<Socket> {
   // Add timestamp to prevent rapid reconnection attempts
   const now = Date.now();
   if (now - lastConnectionAttempt < 2000) {
@@ -207,12 +242,16 @@ export async function connectToServer(config = defaultConfig): Promise<Socket> {
   }
   lastConnectionAttempt = now;
 
-  // القيمة المحددة للخادم دائماً، وتجاهل أي محاولة للحصول على IP من العملية الرئيسية
-  const serverHost = '192.168.1.14';
-  const serverPort = 4000;
-  const updatedConfig = { ...config, serverHost, serverPort };
+  // Always load config from socketConfig.json (unless explicitly passed)
+  const usedConfig = config ?? await getSocketConfig();
+  const serverHost = usedConfig.serverHost;
+  const serverPort = usedConfig.serverPort;
+  if (!serverHost || !serverPort) {
+    throw new Error('Socket config missing serverHost or serverPort');
+  }
+  const updatedConfig = { ...usedConfig };
 
-  console.log(`[Socket] Using fixed server address: ${serverHost}:${serverPort}`);
+  console.log(`[Socket] Using server address from config: ${serverHost}:${serverPort}`);
 
   // If already connected, return existing socket
   if (socket?.connected) {
@@ -240,18 +279,21 @@ export async function connectToServer(config = defaultConfig): Promise<Socket> {
   updateConnectionStatus('connecting', null, { reconnectAttempt: reconnectAttempts });
 
   try {
-    // Construct server URL
-    serverUrl = `http://${updatedConfig.serverHost}:${updatedConfig.serverPort}`;
+    serverUrl = `http://${serverHost}:${serverPort}`;
     console.log(`[Socket] Connecting to Socket.IO server at ${serverUrl}`);
 
-    // Create socket with improved options
     socket = io(serverUrl, {
-      reconnectionAttempts: 0, // We handle reconnection manually
+      reconnectionAttempts: 0,
       reconnection: false,
-      timeout: 15000,
+      timeout: 5000,         // Reduced timeout
       autoConnect: true,
       forceNew: true,
-      transports: ['websocket', 'polling'], // Try WebSocket first, fall back to polling
+      transports: ['polling', 'websocket'], // Try polling first, then websocket
+      path: '/socket.io',
+      extraHeaders: {
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
+      }
     });
 
     // Debug: log all events (except ping/pong)
@@ -269,6 +311,11 @@ export async function connectToServer(config = defaultConfig): Promise<Socket> {
       updateConnectionStatus('connected');
       reconnectAttempts = 0;
       startHeartbeat(updatedConfig.heartbeatInterval);
+
+      // When reconnected, re-register as employee screen if needed
+      if (wasEmployee) {
+        registerAsEmployeeScreen();
+      }
     });
 
     socket.on('connect_error', (error) => {
@@ -285,7 +332,7 @@ export async function connectToServer(config = defaultConfig): Promise<Socket> {
       console.log(`[Socket] Disconnected. Reason: ${reason}`);
       updateConnectionStatus('disconnected', null, { lastError: new Error(reason) });
       stopHeartbeat();
-      
+
       // If server initiated disconnect, try to reconnect after a delay
       if (reason === 'io server disconnect' || reason === 'transport close') {
         setTimeout(() => {
@@ -296,17 +343,23 @@ export async function connectToServer(config = defaultConfig): Promise<Socket> {
       }
     });
 
+    // الإعلان عن تغيير socket
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('socket-changed'));
+    }
+
     // Return new Promise to wait for connection
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         if (!socket?.connected) {
           isConnecting = false;
+          socket?.close();
           const error = new Error('Connection timeout');
-          console.error('[Socket] Connection timeout after 15 seconds');
+          console.error('[Socket] Connection timeout after 5 seconds');
           updateConnectionStatus('error', error);
           reject(error);
         }
-      }, 15000); // 15 second timeout
+      }, 5000); // Reduced to 5 seconds
 
       socket?.on('connect', () => {
         clearTimeout(timeout);
@@ -337,6 +390,11 @@ export function disconnectFromServer() {
     socket.disconnect();
     socket = null;
     updateConnectionStatus('disconnected');
+
+    // الإعلان عن تغيير socket
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('socket-changed'));
+    }
   }
 }
 
@@ -458,13 +516,7 @@ export async function reconnectToServer(): Promise<boolean> {
   maxReconnectAttempts = 0;
 
   try {
-    // استخدام العنوان الثابت دائمًا
-    const config = {
-      ...defaultConfig,
-      serverHost: '192.168.1.14',
-      serverPort: 4000
-    };
-    
+    const config = await getSocketConfig();
     await connectToServer(config);
     return true;
   } catch (error) {
@@ -490,26 +542,62 @@ export async function getNetworkInfo(): Promise<{localIp: string, isConnected: b
 }
 
 // Helper to fetch the local IP and reconnect using it
-async function fetchLocalIpAndReconnect(config = defaultConfig) {
+async function fetchLocalIpAndReconnect(config?: SocketConfig) {
   try {
-    // Try connecting to localhost first
-    await connectToServer(config);
+    const usedConfig = config ?? await getSocketConfig();
+    await connectToServer(usedConfig);
     // Ask server for its local IP
     const info = await getNetworkInfo();
-    if (info.localIp && info.localIp !== config.serverHost) {
+    if (info.localIp && info.localIp !== usedConfig.serverHost) {
       // If local IP is different, reconnect using it
-      config.serverHost = info.localIp;
+      usedConfig.serverHost = info.localIp;
       disconnectFromServer();
-      await connectToServer(config);
+      await connectToServer(usedConfig);
     }
   } catch (e) {
     console.error('Failed to fetch local IP and reconnect:', e);
   }
 }
 
-// Export a helper for screens to call
-export async function connectWithLocalIp(config = defaultConfig) {
+export async function connectWithLocalIp(config?: SocketConfig) {
   await fetchLocalIpAndReconnect(config);
+}
+
+// Track if this client was registered as an employee screen
+let wasEmployee = false;
+
+// تسجيل للخادم كشاشة موظف
+export function registerAsEmployeeScreen(): void {
+  if (socket?.connected) {
+    socket.emit('registerScreen', 'employee');
+    console.log('[Socket] Registered as employee screen');
+    wasEmployee = true; // Mark that this client is an employee screen
+  } else {
+    console.error('[Socket] Cannot register as employee - not connected');
+  }
+}
+
+// الاستماع لتعيين رقم المكتب
+export function listenForCounterId(callback: (counterId: number) => void): () => void {
+  if (!socket) {
+    console.error('[Socket] Cannot listen for counter ID - no socket');
+    return () => {};
+  }
+
+  socket.on('assignedCounterId', (counterId: number) => {
+    console.log(`[Socket] Received assigned counter ID: ${counterId}`);
+
+    // Update connection status with the counter ID
+    if (currentStatus.status === 'connected') {
+      updateConnectionStatus('connected', null, { counterId });
+    }
+
+    callback(counterId);
+  });
+
+  return () => {
+    socket?.off('assignedCounterId');
+  };
 }
 
 // Default export for easy importing

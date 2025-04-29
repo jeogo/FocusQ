@@ -9,6 +9,7 @@ import { QueueProvider } from './context/QueueContext'
 const App = memo(function App(): JSX.Element {
   const [screen, setScreen] = useState<string | null>(null)
   const [counterNumber, setCounterNumber] = useState<number | null>(null)
+  const [displayId, setDisplayId] = useState<number | null>(null) // New state for display ID
   const [isLoading, setIsLoading] = useState(true)
   const mountCount = useRef(0)
 
@@ -33,6 +34,7 @@ const App = memo(function App(): JSX.Element {
       const urlParams = new URLSearchParams(window.location.search);
       const screenParam = urlParams.get('screen');
       const counterParam = urlParams.get('counter');
+      const displayParam = urlParams.get('display'); // Add display parameter support
 
       // When in production, use the hash
       const hash = window.location.hash.substring(1);
@@ -40,6 +42,7 @@ const App = memo(function App(): JSX.Element {
       // Screen type priority: URL param > hash > default (customer)
       let detectedScreen = 'customer';
       let detectedCounter: number | null = null;
+      let detectedDisplay: number | null = null; // Add display ID detection
 
       if (screenParam) {
         detectedScreen = screenParam;
@@ -47,17 +50,25 @@ const App = memo(function App(): JSX.Element {
         if (screenParam === 'employee' && counterParam) {
           detectedCounter = parseInt(counterParam, 10);
         }
+
+        if (screenParam === 'display' && displayParam) {
+          detectedDisplay = parseInt(displayParam, 10);
+        }
       } else if (hash) {
-        // Handle hash format like #employee/1
+        // Handle hash format like #employee/1 or #display/2
         const parts = hash.split('/');
         detectedScreen = parts[0];
 
         if (detectedScreen === 'employee' && parts.length > 1) {
           detectedCounter = parseInt(parts[1], 10);
         }
+
+        if (detectedScreen === 'display' && parts.length > 1) {
+          detectedDisplay = parseInt(parts[1], 10);
+        }
       }
 
-      console.log(`Screen determined: ${detectedScreen}${detectedCounter ? ` (Counter: ${detectedCounter})` : ''}`);
+      console.log(`Screen determined: ${detectedScreen}${detectedCounter ? ` (Counter: ${detectedCounter})` : ''}${detectedDisplay ? ` (Display: ${detectedDisplay})` : ''}`);
 
       // Set appropriate title based on screen type
       switch (detectedScreen) {
@@ -65,7 +76,7 @@ const App = memo(function App(): JSX.Element {
           document.title = 'خدمة العملاء - FocusQ';
           break;
         case 'display':
-          document.title = 'شاشة العرض - FocusQ';
+          document.title = `شاشة العرض${detectedDisplay ? ` ${detectedDisplay}` : ''} - FocusQ`;
           break;
         case 'employee':
           document.title = `شاشة الموظف${detectedCounter ? ` - مكتب ${detectedCounter}` : ''} - FocusQ`;
@@ -78,6 +89,7 @@ const App = memo(function App(): JSX.Element {
       if (isMounted) {
         setScreen(detectedScreen);
         setCounterNumber(detectedCounter);
+        setDisplayId(detectedDisplay);
         setIsLoading(false);
       }
     };
@@ -112,7 +124,7 @@ const App = memo(function App(): JSX.Element {
       case 'customer':
         return <CustomerScreen />
       case 'display':
-        return <DisplayScreen />
+        return <DisplayScreen displayId={displayId || 1} /> // Pass display ID with default of 1
       case 'employee':
         return <EmployeeScreen counterId={counterNumber || 1} />
       case 'admin':

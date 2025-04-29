@@ -112,14 +112,28 @@ export function getTickets() {
   }
 }
 
-export function getTicketById(id) {
+// Update ticket status and set which counter is serving it
+export function updateTicketStatusAndServer(ticketId, status, counterId) {
   try {
     const tickets = getTickets()
-    return tickets.find(ticket => ticket.id === id) || null
+    const updatedTickets = tickets.map(ticket =>
+      ticket.id === ticketId
+        ? { ...ticket, status, counterNumber: counterId, servedByCounterId: counterId }
+        : ticket
+    )
+    fs.writeFileSync(TICKETS_FILE, JSON.stringify(updatedTickets, null, 2), 'utf8')
+    return true
   } catch (error) {
-    console.error('Error getting ticket by ID:', error)
-    return null
+    console.error('Error updating ticket status and server:', error)
+    return false
   }
+}
+
+// Get ticket by ID (enhanced to include servedByCounterId)
+export function getTicketById(id) {
+  const tickets = getTickets()
+  const ticket = tickets.find(t => t.id === id)
+  return ticket || null
 }
 
 export function addTicket(serviceType, customerName = '') {
@@ -218,7 +232,36 @@ export function getCounterById(id) {
 export function addCounter() {
   try {
     const counters = getCounters()
-    const newId = counters.length > 0 ? Math.max(...counters.map(c => c.id)) + 1 : 1
+
+    // If no counters exist, start with ID 1
+    if (counters.length === 0) {
+      const newCounter = {
+        id: 1,
+        name: 'المكتب 1',
+        status: 'active',
+        busy: false,
+        currentTicket: null
+      }
+      counters.push(newCounter)
+      fs.writeFileSync(COUNTERS_FILE, JSON.stringify(counters, null, 2), 'utf8')
+      return newCounter
+    }
+
+    // Sort counters by ID to find sequential gaps
+    const sortedCounters = [...counters].sort((a, b) => a.id - b.id)
+
+    // Find the first gap in the sequence
+    let newId = 1
+    for (const counter of sortedCounters) {
+      if (counter.id === newId) {
+        newId++
+      } else if (counter.id > newId) {
+        // Found a gap
+        break
+      }
+    }
+
+    // Create new counter with the first available ID
     const newCounter = {
       id: newId,
       name: `المكتب ${newId}`,
@@ -226,6 +269,7 @@ export function addCounter() {
       busy: false,
       currentTicket: null
     }
+
     counters.push(newCounter)
     fs.writeFileSync(COUNTERS_FILE, JSON.stringify(counters, null, 2), 'utf8')
     return newCounter

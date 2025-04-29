@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback, JSX } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useQueue } from '../context/QueueContext'
-import { Clock, Users, Calendar, AlertCircle } from 'lucide-react'
+import { Clock, Users, Calendar, AlertCircle, Settings } from 'lucide-react'
+import PrinterSettings from '../components/PrinterSettings'
+import { formatUtils } from '../services/QueueService'
 
 type ServiceType = {
   id: number
@@ -29,6 +31,7 @@ export default function CustomerScreen(): JSX.Element {
   const [services, setServices] = useState<ServiceType[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [showSettings, setShowSettings] = useState(false)
 
   // Update time every minute
   useEffect(() => {
@@ -254,25 +257,6 @@ export default function CustomerScreen(): JSX.Element {
     }
   }, [showTicket])
 
-  // تحسين تنسيق التاريخ
-  const formatDate = (date: Date): string => {
-    return new Intl.DateTimeFormat('ar', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    }).format(date)
-  }
-
-  // تحسين تنسيق الوقت
-  const formatTime = (date: Date): string => {
-    return new Intl.DateTimeFormat('ar', {
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: true
-    }).format(date)
-  }
-
   // حساب وقت الانتظار المتوقع
   const calculateEstimatedWaitTime = (): string => {
     const waitingCount = queueState?.tickets?.filter(t => t.status === 'waiting').length || 0;
@@ -286,7 +270,7 @@ export default function CustomerScreen(): JSX.Element {
     const variation = Math.random() * 0.4 - 0.2;
     estimatedMinutes = Math.max(1, Math.round(estimatedMinutes * (1 + variation)));
 
-    return `${estimatedMinutes} دقيقة تقريباً`;
+    return formatUtils.formatEstimatedWaitTime(estimatedMinutes);
   };
 
   // طباعة التذكرة
@@ -315,8 +299,8 @@ export default function CustomerScreen(): JSX.Element {
       setTicketDetails({
         number: newTicket.id,
         service: serviceInfo?.name || selectedService,
-        date: formatDate(new Date(newTicket.timestamp)),
-        time: formatTime(new Date(newTicket.timestamp)),
+        date: formatUtils.formatDate(new Date(newTicket.timestamp)),
+        time: formatUtils.formatTime(new Date(newTicket.timestamp)),
         waitTime: calculateEstimatedWaitTime()
       });
 
@@ -384,7 +368,24 @@ export default function CustomerScreen(): JSX.Element {
       className="min-h-screen w-full bg-gradient-to-br from-blue-50 via-indigo-50 to-white overflow-hidden"
       dir="rtl"
     >
+      {/* Settings button in the top corner */}
+      <div className="absolute top-4 left-4 z-40">
+        <button
+          onClick={() => setShowSettings(true)}
+          className="bg-white p-2 rounded-full shadow-md hover:bg-gray-50 transition-colors"
+          aria-label="إعدادات الطابعة"
+        >
+          <Settings size={20} className="text-gray-700" />
+        </button>
+      </div>
+
       {renderConnectionStatus()}
+
+      {/* Printer Settings Dialog */}
+      <PrinterSettings
+        isOpen={showSettings}
+        onClose={() => setShowSettings(false)}
+      />
 
       {errorMessage && errorMessage !== 'غير متصل بالخادم' && (
         <div className="fixed top-4 left-4 right-4 md:left-auto md:right-4 md:w-96 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg shadow-md z-50">
@@ -423,12 +424,12 @@ export default function CustomerScreen(): JSX.Element {
             <div className="flex flex-wrap items-center gap-3 text-gray-700">
               <div className="flex items-center">
                 <Calendar size={18} className="text-indigo-600 ml-1" />
-                <div className="text-sm sm:text-base font-medium">{formatDate(currentTime)}</div>
+                <div className="text-sm sm:text-base font-medium">{formatUtils.formatDate(currentTime)}</div>
               </div>
               <div className="mx-2 h-4 w-px bg-gray-300 hidden sm:block"></div>
               <div className="flex items-center">
                 <Clock size={18} className="text-indigo-600 ml-1" />
-                <div className="text-sm sm:text-base">{formatTime(currentTime)}</div>
+                <div className="text-sm sm:text-base">{formatUtils.formatTime(currentTime)}</div>
               </div>
             </div>
           </div>

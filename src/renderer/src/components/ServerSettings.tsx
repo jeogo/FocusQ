@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import * as SocketClient from '../services/socket/client';
+import type { SocketConfig } from '../services/socket/client';
 
 export default function ServerSettings({ onClose }: { onClose: () => void }) {
   const [serverIp, setServerIp] = useState('');
@@ -28,12 +29,11 @@ export default function ServerSettings({ onClose }: { onClose: () => void }) {
       await SocketClient.connectToServer({
         serverHost: serverIp,
         serverPort: parseInt(serverPort),
-        reconnectionAttempts: 0,
-        reconnectionDelay: 0,
-        timeout: 0,
-        heartbeatInterval: 0,
-        heartbeatTimeout: 0
-      });
+        reconnectionAttempts: 5,
+        reconnectionDelay: 2000,
+        heartbeatInterval: 10000,
+        heartbeatTimeout: 20000,
+      } as SocketConfig);
       
       setMessage('تم الاتصال بالخادم بنجاح!');
       setTimeout(onClose, 1500);

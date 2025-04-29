@@ -8,16 +8,9 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: {
-          index: resolve('src/main/index.ts'),
+          index: resolve('src/main/index.ts')
         },
-        external: [
-          'net',
-          'http',
-          'path',
-          'fs',
-          'os',
-          'electron'
-        ]
+        external: ['net', 'http', 'path', 'fs', 'os', 'electron']
       }
     }
   },
@@ -32,17 +25,7 @@ export default defineConfig({
       }
     },
     plugins: [react()],
-    css: {
-      postcss: './postcss.config.js'
-    },
-    build: {
-      rollupOptions: {
-        input: {
-          index: resolve('src/renderer/index.html')
-        }
-      }
-    },
-    publicDir: resolve('resources'),
+    publicDir: resolve(__dirname, 'resources'), // Point directly to resources folder
     server: {
       port: Number(process.env.PORT) || 3000,
       host: process.env.HOST || 'localhost',
@@ -50,10 +33,12 @@ export default defineConfig({
       hmr: {
         host: 'localhost'
       },
-      cors: true
-    },
-    optimizeDeps: {
-      exclude: ['events', 'os', 'path', 'fs']
+      cors: true,
+      middlewareMode: false,
+      fs: {
+        strict: false,
+        allow: ['..']
+      }
     }
   }
 })
